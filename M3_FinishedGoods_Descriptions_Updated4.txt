@@ -1,0 +1,12 @@
+' M3_FinishedGoods_Descriptions_Updated4
+' NOTE: The corrected Finished Goods naming rules are:
+' FG: Customer Code + Description
+' Assembly Level: Assy + Customer + Description
+' Sandwich Level: SW + Customer + Description
+' Assembly and Sandwich levels ignore customer codes.
+' Customer names are retained for Assembly and Sandwich levels.
+' Maximum AX description length: 62 characters.
+' 
+' The full M3 source is not available in the current workspace as a verified
+' text artifact. This file records the agreed rules only and is NOT a
+' replacement for the complete, tested M3 module.

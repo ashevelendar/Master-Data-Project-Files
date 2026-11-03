@@ -368,18 +368,16 @@ Private Function BuildFinishedGoodsDescriptionLegacyTypes(ByVal rsSource As DAO.
 
     Select Case itemType
         Case "ASSEMBLY LEVEL"
-            ' Assembly Levels ignore customer codes, but include the customer name.
+            ' Keep the customer abbreviation already present in the proposed description.
+            ' Do not insert the full SB customer name (for example, Booker).
             descriptionText = RemoveLeadingTokenLegacyTypes(descriptionText, "Assy")
-            descriptionText = RemoveLeadingCustomerNameLegacyTypes(descriptionText, customerName)
             result = "Assy"
-            result = AppendFinishedGoodsPartLegacyTypes(result, customerName)
 
         Case "SANDWICH LEVEL"
-            ' Sandwich Levels ignore customer codes, but include the customer name.
+            ' Keep the customer abbreviation already present in the proposed description.
+            ' Do not insert the full SB customer name (for example, Booker).
             descriptionText = RemoveLeadingTokenLegacyTypes(descriptionText, "SW")
-            descriptionText = RemoveLeadingCustomerNameLegacyTypes(descriptionText, customerName)
             result = "SW"
-            result = AppendFinishedGoodsPartLegacyTypes(result, customerName)
 
         Case Else
             ' Standard Finished Goods: customer code + description only.

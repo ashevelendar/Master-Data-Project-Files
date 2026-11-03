@@ -997,6 +997,7 @@ For Each itemKey In costGroups.Keys
                 wsLocation.Cells(newRow, 4).value = "WHRR"
 
                 newRow = wsLocation.Cells(wsLocation.Rows.Count, "A").End(-4162).Row + 1
+
                 wsLocation.Cells(newRow, 1).value = itemID
                 wsLocation.Cells(newRow, 2).value = dataAreaID
                 wsLocation.Cells(newRow, 3).value = "F1"
@@ -1233,6 +1234,25 @@ Private Sub BuildEDIDataSheet(ByVal xlBook As Object, ByVal costGroups As Object
         wsEDI.Name = "EDIData"
     Else
         wsEDI.Cells.Clear
+    End If
+
+    ' Remove only completely empty default Excel sheets (Sheet2, Sheet3, etc.).
+    ' Any worksheet containing data, or any deliberately named worksheet, is kept.
+    For r = xlBook.Worksheets.Count To 1 Step -1
+        If xlBook.Worksheets(r).Name <> "EDIData" Then
+            If Left$(xlBook.Worksheets(r).Name, 5) = "Sheet" Then
+                If IsNumeric(Mid$(xlBook.Worksheets(r).Name, 6)) Then
+                    If xlBook.Application.WorksheetFunction.CountA(xlBook.Worksheets(r).UsedRange) = 0 Then
+                        xlBook.Worksheets(r).Delete
+                    End If
+                End If
+            End If
+        End If
+    Next r
+
+    ' Keep EDIData as the final worksheet in the exported workbook.
+    If wsEDI.Index <> xlBook.Worksheets.Count Then
+        wsEDI.Move After:=xlBook.Worksheets(xlBook.Worksheets.Count)
     End If
 
     headers = Array("DataAreaId", "ItemId", "ItemS21", "CustGroup", "CustItemCode", "GTIN", "CaseSize")

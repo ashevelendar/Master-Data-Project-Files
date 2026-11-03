@@ -348,7 +348,8 @@ End Function
 Private Function BuildFinishedGoodsDescriptionLegacyTypes(ByVal rsSource As DAO.Recordset, ByVal originalDescription As String) As String
 
     Dim itemType As String
-    Dim customerCode As String
+    Dim customerItemCode As String
+    Dim customerAbbreviation As String
     Dim customerName As String
     Dim descriptionText As String
     Dim result As String
@@ -357,35 +358,45 @@ Private Function BuildFinishedGoodsDescriptionLegacyTypes(ByVal rsSource As DAO.
 
     itemType = GetFinishedGoodsItemTypeLegacyTypes(rsSource)
 
-    ' Customer display values may look like "BKR - Booker" or "12345 BUD - Budgens".
-    ' Extract the final short code before the hyphen and the customer name after it.
-    customerName = GetFirstNonBlankFieldTextLegacyTypes(rsSource, _
-        Array("SB Customer Name", "SB Customer", "Customer Name", "Customer"))
+    ' Customer Item Code is the numeric/customer-specific code used for standard FG.
+    customerItemCode = CleanFinishedGoodsCustomerCodeLegacyTypes( _
+        GetFieldTextLegacyTypes(rsSource, "Customer Item Code"))
+
+    ' SB Customer Name contains values such as "BKR - Booker" or "BUD - Budgens".
+    ' Keep the abbreviation for the AX description, not the full customer name.
+    customerName = GetFieldTextLegacyTypes(rsSource, "SB Customer Name")
     ParseFinishedGoodsCustomerLegacyTypes customerName, parsedCode, parsedName
-    If Len(parsedName) > 0 Then customerName = parsedName
+    customerAbbreviation = CleanFinishedGoodsCustomerCodeLegacyTypes(parsedCode)
 
     descriptionText = Trim$(originalDescription)
 
     Select Case itemType
         Case "ASSEMBLY LEVEL"
-            ' Keep the customer abbreviation already present in the proposed description.
-            ' Do not insert the full SB customer name (for example, Booker).
             descriptionText = RemoveLeadingTokenLegacyTypes(descriptionText, "Assy")
+            If Len(customerAbbreviation) > 0 Then
+                descriptionText = RemoveLeadingTokenLegacyTypes(descriptionText, customerAbbreviation)
+            End If
             result = "Assy"
+            result = AppendFinishedGoodsPartLegacyTypes(result, customerAbbreviation)
 
         Case "SANDWICH LEVEL"
-            ' Keep the customer abbreviation already present in the proposed description.
-            ' Do not insert the full SB customer name (for example, Booker).
             descriptionText = RemoveLeadingTokenLegacyTypes(descriptionText, "SW")
+            If Len(customerAbbreviation) > 0 Then
+                descriptionText = RemoveLeadingTokenLegacyTypes(descriptionText, customerAbbreviation)
+            End If
             result = "SW"
+            result = AppendFinishedGoodsPartLegacyTypes(result, customerAbbreviation)
 
         Case Else
-            ' Standard Finished Goods: customer code + description only.
-            customerCode = CleanFinishedGoodsCustomerCodeLegacyTypes(parsedCode)
-            If Len(customerCode) > 0 Then
-                descriptionText = RemoveLeadingTokenLegacyTypes(descriptionText, customerCode)
+            ' Standard Finished Goods: Customer Item Code + SB customer abbreviation.
+            If Len(customerItemCode) > 0 Then
+                descriptionText = RemoveLeadingTokenLegacyTypes(descriptionText, customerItemCode)
             End If
-            result = customerCode
+            If Len(customerAbbreviation) > 0 Then
+                descriptionText = RemoveLeadingTokenLegacyTypes(descriptionText, customerAbbreviation)
+            End If
+            result = customerItemCode
+            result = AppendFinishedGoodsPartLegacyTypes(result, customerAbbreviation)
     End Select
 
     result = AppendFinishedGoodsPartLegacyTypes(result, descriptionText)
@@ -402,9 +413,9 @@ Private Function GetFinishedGoodsItemTypeLegacyTypes(ByVal rsSource As DAO.Recor
 
     Dim itemType As String
 
-    ' Classification is based exclusively on the SharePoint Item Type field.
-    itemType = UCase$(Trim$(GetFirstNonBlankFieldTextLegacyTypes(rsSource, _
-        Array("Item Type", "ItemType"))))
+    ' Access exposes the SharePoint display value in Item Type1.
+    ' The separate Item Type field returns the lookup value 0, so do not use it.
+    itemType = UCase$(Trim$(GetFieldTextLegacyTypes(rsSource, "Item Type1")))
 
     If InStr(1, itemType, "ASSEMBLY LEVEL", vbTextCompare) > 0 Or itemType = "ASSY" Then
         GetFinishedGoodsItemTypeLegacyTypes = "ASSEMBLY LEVEL"

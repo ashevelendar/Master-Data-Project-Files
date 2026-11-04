@@ -924,14 +924,6 @@ For r = lastOrderRow To 2 Step -1
                     doCopy = True
                 End If
 
-            ElseIf costGroup = "FG" Or costGroup = "SL" Or costGroup = "AL" Then
-
-                ' FG / SL / AL:
-                ' Only SITE + BAG + WHAG.
-                If defaultSite = "SITE" And orderSiteId = "BAG" And locationId = "WHAG" Then
-                    doCopy = True
-                End If
-
             End If
 
         End If

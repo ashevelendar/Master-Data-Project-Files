@@ -925,10 +925,9 @@ Next r
 '   WHAG becomes WHMR.
 '   Blank locations remain blank.
 '
-' FG / SL / AL + BAG:
-'   Copy only SITE / BAG / WHAG rows.
-'   BAG becomes BMR.
-'   WHAG becomes WHMR.
+' FG / SL / AL:
+'   Do not create BMR / WHMR Item_OrderSettings rows.
+'   Keep the original BAG rows unchanged.
 '
 ' Original rows are retained.
 wsError = "Item_OrderSettings duplication"
@@ -963,14 +962,6 @@ For r = lastOrderRow To 2 Step -1
                 ' RM / PK:
                 ' Copy every BAG row, including DEFAULT.
                 If orderSiteId = "BAG" Then
-                    doCopy = True
-                End If
-
-            ElseIf costGroup = "FG" Or costGroup = "SL" Or costGroup = "AL" Then
-
-                ' FG / SL / AL:
-                ' Only SITE + BAG + WHAG.
-                If defaultSite = "SITE" And orderSiteId = "BAG" And locationId = "WHAG" Then
                     doCopy = True
                 End If
 

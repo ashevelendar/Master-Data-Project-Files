@@ -884,9 +884,8 @@ Next r
 '   Blank locations remain blank.
 '
 ' FG / SL / AL + BAG:
-'   Copy only SITE / BAG / WHAG rows.
-'   BAG becomes BMR.
-'   WHAG becomes WHMR.
+'   Do NOT create BMR / WHMR Item_OrderSettings rows.
+'   Keep the original BAG rows only.
 '
 ' Original rows are retained.
 wsError = "Item_OrderSettings duplication"

@@ -914,57 +914,43 @@ Next r
 ' BAG -> BMR ITEM_ORDERSETTINGS DUPLICATION
 ' ============================================================
 ' RM / PK + BAG:
-'   Copy every BAG row, including DEFAULT rows.
+'   Duplicate each original BAG row, including DEFAULT rows.
 '   BAG becomes BMR.
 '   WHAG becomes WHMR.
+'   Other warehouse values (for example WHF1 / WHRR) are retained.
 '   Blank locations remain blank.
 '
 ' MIX / WIP + BAG:
-'   Copy every BAG row, including DEFAULT rows.
-'   BAG becomes BMR.
-'   WHAG becomes WHMR.
-'   Blank locations remain blank.
+'   Same duplication behaviour as RM / PK.
 '
 ' FG / SL / AL:
-'   Do not create BMR / WHMR Item_OrderSettings rows.
-'   Keep the original BAG rows unchanged.
+'   Do not create BMR Item_OrderSettings rows.
+'   Their additional RR / F1 warehouses are handled in LocationUpdate.
 '
-' Original rows are retained.
+' Original rows are retained. Only source rows present before this
+' block are considered, preventing generated rows from being duplicated.
 wsError = "Item_OrderSettings duplication"
 
-' Work backwards so newly inserted rows cannot be processed again.
 lastOrderRow = wsOrder.Cells(wsOrder.Rows.Count, "A").End(-4162).Row
 
-For r = lastOrderRow To 2 Step -1
+' Capture the source row count before appending any duplicates.
+For r = 2 To lastOrderRow
 
-    defaultSite = Trim(UCase(CStr(wsOrder.Cells(r, 1).value)))
     itemID = Trim(CStr(wsOrder.Cells(r, 3).value))
     orderSiteId = Trim(UCase(CStr(wsOrder.Cells(r, 4).value)))
     locationId = Trim(UCase(CStr(wsOrder.Cells(r, 5).value)))
     doCopy = False
 
-    If costGroups.exists(itemID) And itemSites.exists(itemID) Then
+    If orderSiteId = "BAG" Then
 
-        costGroup = costGroups(itemID)
+        If costGroups.exists(itemID) And itemSites.exists(itemID) Then
 
-        If InStr(1, itemSites(itemID), "|BAG|", vbTextCompare) > 0 Then
+            costGroup = costGroups(itemID)
 
             If mixWipItems.exists(itemID) Then
-
-                ' MIX / WIP:
-                ' Copy every BAG row, including DEFAULT.
-                If orderSiteId = "BAG" Then
-                    doCopy = True
-                End If
-
+                doCopy = True
             ElseIf costGroup = "RM" Or costGroup = "PK" Then
-
-                ' RM / PK:
-                ' Copy every BAG row, including DEFAULT.
-                If orderSiteId = "BAG" Then
-                    doCopy = True
-                End If
-
+                doCopy = True
             End If
 
         End If
@@ -975,21 +961,21 @@ For r = lastOrderRow To 2 Step -1
 
         newRow = wsOrder.Cells(wsOrder.Rows.Count, "A").End(-4162).Row + 1
 
+        ' Copy the entire source row, retaining all other field values.
         wsOrder.Rows(r).Copy
-        wsOrder.Rows(newRow).Insert
+        wsOrder.Rows(newRow).PasteSpecial -4104
         xlApp.CutCopyMode = False
 
-        wsOrder.Cells(newRow, 4).value = "BMR"
+        wsOrder.Cells(newRow, 4).Value = "BMR"
 
         If locationId = "WHAG" Then
-            wsOrder.Cells(newRow, 5).value = "WHMR"
+            wsOrder.Cells(newRow, 5).Value = "WHMR"
         End If
 
     End If
 
 Next r
 
-' ============================================================
 ' FG / SL / AL + BAG -> ADD RR / WHRR AND F1 / WHF1 TO LOCATIONUPDATE
 ' ============================================================
 ' Add two rows per unique FG / SL / AL ItemId where that item has BAG in

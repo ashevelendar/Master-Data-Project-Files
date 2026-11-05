@@ -583,6 +583,9 @@ Dim wsSupplier As Object
 Dim lastRow As Long
 Dim r As Long
 Dim newRow As Long
+Dim checkRow As Long
+Dim targetWarehouse As String
+Dim matchingBmrRow As Boolean
 Dim itemID As String
 Dim costGroup As String
 Dim defaultSite As String
@@ -906,51 +909,49 @@ For r = lastCrossRow To 2 Step -1
             wsCross.Rows(r).Delete
         End If
 
-    End If
-
-Next r
-
+    End' BAG / BMR ITEM_ORDERSETTINGS ROWS
 ' ============================================================
-' BAG -> BMR ITEM_ORDERSETTINGS DUPLICATION
-' ============================================================
-' RM / PK + BAG:
-'   Duplicate each original BAG row, including DEFAULT rows.
-'   BAG becomes BMR.
-'   WHAG becomes WHMR.
-'   Other warehouse values (for example WHF1 / WHRR) are retained.
-'   Blank locations remain blank.
+' For every AX item with CostGroup RM, PK, MX, IW, FG, AL or SL:
 '
-' MIX / WIP + BAG:
-'   Same duplication behaviour as RM / PK.
+' BAG source rows are retained:
+'   3 SITE rows, one each for InventItemInventSetup,
+'   InventItemPurchSetup and InventItemSalesSetup, with WHAG.
+'   3 DEFAULT rows, one each for the same setup types, blank location.
 '
-' FG / SL / AL:
-'   Do not create BMR Item_OrderSettings rows.
-'   Their additional RR / F1 warehouses are handled in LocationUpdate.
+' Matching BMR rows are added:
+'   3 SITE rows with WHMR.
+'   3 DEFAULT rows with blank location.
 '
-' Original rows are retained. Only source rows present before this
-' block are considered, preventing generated rows from being duplicated.
-wsError = "Item_OrderSettings duplication"
+' Only the required SITE/WHAG and DEFAULT/blank BAG source rows are copied.
+' Existing BMR matches are not added again.
+wsError = "Item_OrderSettings BAG / BMR generation"
 
 lastOrderRow = wsOrder.Cells(wsOrder.Rows.Count, "A").End(-4162).Row
 
-' Capture the source row count before appending any duplicates.
+' Iterate only the rows exported originally. New BMR rows are appended below.
 For r = 2 To lastOrderRow
 
-    itemID = Trim(CStr(wsOrder.Cells(r, 3).value))
-    orderSiteId = Trim(UCase(CStr(wsOrder.Cells(r, 4).value)))
-    locationId = Trim(UCase(CStr(wsOrder.Cells(r, 5).value)))
+    defaultSite = Trim(UCase(CStr(wsOrder.Cells(r, 1).Value)))
+    itemID = Trim(CStr(wsOrder.Cells(r, 3).Value))
+    orderSiteId = Trim(UCase(CStr(wsOrder.Cells(r, 4).Value)))
+    locationId = Trim(UCase(CStr(wsOrder.Cells(r, 5).Value)))
     doCopy = False
+    targetWarehouse = vbNullString
 
-    If orderSiteId = "BAG" Then
+    If orderSiteId = "BAG" And costGroups.exists(itemID) Then
 
-        If costGroups.exists(itemID) And itemSites.exists(itemID) Then
+        costGroup = UCase$(Trim$(CStr(costGroups(itemID))))
 
-            costGroup = costGroups(itemID)
+        If costGroup = "RM" Or costGroup = "PK" Or costGroup = "MX" Or _
+           costGroup = "IW" Or costGroup = "FG" Or costGroup = "AL" Or _
+           costGroup = "SL" Then
 
-            If mixWipItems.exists(itemID) Then
+            If defaultSite = "SITE" And locationId = "WHAG" Then
                 doCopy = True
-            ElseIf costGroup = "RM" Or costGroup = "PK" Then
+                targetWarehouse = "WHMR"
+            ElseIf defaultSite = "DEFAULT" And locationId = "" Then
                 doCopy = True
+                targetWarehouse = vbNullString
             End If
 
         End If
@@ -959,17 +960,39 @@ For r = 2 To lastOrderRow
 
     If doCopy Then
 
-        newRow = wsOrder.Cells(wsOrder.Rows.Count, "A").End(-4162).Row + 1
+        ' Avoid creating a second copy if the matching BMR row is already present.
+        matchingBmrRow = False
+        For checkRow = 2 To wsOrder.Cells(wsOrder.Rows.Count, "A").End(-4162).Row
+            If StrComp(Trim(CStr(wsOrder.Cells(checkRow, 1).Value)), defaultSite, vbTextCompare) = 0 _
+               And StrComp(Trim(CStr(wsOrder.Cells(checkRow, 2).Value)), Trim(CStr(wsOrder.Cells(r, 2).Value)), vbTextCompare) = 0 _
+               And StrComp(Trim(CStr(wsOrder.Cells(checkRow, 3).Value)), itemID, vbTextCompare) = 0 _
+               And StrComp(Trim(CStr(wsOrder.Cells(checkRow, 4).Value)), "BMR", vbTextCompare) = 0 _
+               And StrComp(Trim(CStr(wsOrder.Cells(checkRow, 5).Value)), targetWarehouse, vbTextCompare) = 0 Then
+                matchingBmrRow = True
+                Exit For
+            End If
+        Next checkRow
 
-        ' Copy the entire source row, retaining all other field values.
-        wsOrder.Rows(r).Copy
-        wsOrder.Rows(newRow).PasteSpecial -4104
-        xlApp.CutCopyMode = False
+        If Not matchingBmrRow Then
 
-        wsOrder.Cells(newRow, 4).Value = "BMR"
+            newRow = wsOrder.Cells(wsOrder.Rows.Count, "A").End(-4162).Row + 1
 
-        If locationId = "WHAG" Then
-            wsOrder.Cells(newRow, 5).Value = "WHMR"
+            ' Copy the source setup record, preserving all remaining fields.
+            wsOrder.Rows(r).Copy
+            wsOrder.Rows(newRow).PasteSpecial -4104
+            xlApp.CutCopyMode = False
+
+            wsOrder.Cells(newRow, 1).Value = defaultSite
+            wsOrder.Cells(newRow, 4).Value = "BMR"
+            wsOrder.Cells(newRow, 5).Value = targetWarehouse
+
+        End If
+
+    End If
+
+Next r
+
+     wsOrder.Cells(newRow, 5).Value = "WHMR"
         End If
 
     End If

@@ -910,13 +910,7 @@ For r = lastCrossRow To 2 Step -1
             wsCross.Rows(r).Delete
         End If
 
-    EndIf InStr(1, allowedSites, "|" & crossSiteId & "|", vbTextCompare) = 0 Then
-            wsCross.Rows(r).Delete
-        End If
-
-    End If
-
-Next r
+    Next r
 
 ' BAG / BMR ITEM_ORDERSETTINGS ROWS
 ' ============================================================

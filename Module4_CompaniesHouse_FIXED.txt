@@ -1,0 +1,533 @@
+Attribute VB_Name = "Module4"
+Option Compare Database
+Option Explicit
+
+'============================================================
+' SUPPLIER MASTER DATA - COMPANIES HOUSE INTEGRATION
+'
+' Uses the official Companies House Public Data API:
+' GET https://api.company-information.service.gov.uk/company/{companyNumber}
+'
+' API key storage:
+'   SUPP_tblSettings, SettingName = CompaniesHouseAPIKey
+'
+' Run SUPP_SetCompaniesHouseAPIKey once to configure the key.
+' Do not hard-code the key into VBA or send it to anyone.
+'============================================================
+
+Private Const SUPP_SETTINGS_TABLE As String = "SUPP_tblSettings"
+Private Const SUPP_API_KEY_SETTING As String = "CompaniesHouseAPIKey"
+Private Const SUPP_APP_SETTING As String = "CompaniesHouseApplication"
+Private Const SUPP_APP_NAME As String = "Supplier Checking Tool"
+Private Const SUPP_COMPANY_API_ROOT As String = "https://api.company-information.service.gov.uk/company/"
+
+'------------------------------------------------------------
+' Run once from the VBA editor (F5) to store the API key.
+' Application registered with Companies House: Supplier Checking Tool.
+'------------------------------------------------------------
+Public Sub SUPP_SetCompaniesHouseAPIKey()
+
+    On Error GoTo ErrorHandler
+
+    Dim db As DAO.Database
+    Dim rs As DAO.Recordset
+    Dim apiKey As String
+
+    apiKey = Trim$(InputBox( _
+        "Paste your Companies House API key below." & vbCrLf & vbCrLf & _
+        "The key will be stored in this Access database's local settings table.", _
+        "Configure Companies House API Key"))
+
+    If Len(apiKey) = 0 Then
+        MsgBox "No API key entered. Nothing has been changed.", _
+               vbInformation, "Companies House Setup"
+        Exit Sub
+    End If
+
+    Set db = CurrentDb
+    SUPP_EnsureSettingsTable db
+
+    Set rs = db.OpenRecordset( _
+        "SELECT * FROM [" & SUPP_SETTINGS_TABLE & "] " & _
+        "WHERE [SettingName] = '" & SUPP_API_KEY_SETTING & "';", _
+        dbOpenDynaset)
+
+    If rs.EOF Then
+        rs.AddNew
+        rs.Fields("SettingName").value = SUPP_API_KEY_SETTING
+    Else
+        rs.Edit
+    End If
+
+    rs.Fields("SettingValue").value = apiKey
+    rs.Update
+    rs.Close
+    Set rs = Nothing
+
+    'Also record the application name used for this integration.
+    Set rs = db.OpenRecordset( _
+        "SELECT * FROM [" & SUPP_SETTINGS_TABLE & "] " & _
+        "WHERE [SettingName] = '" & SUPP_APP_SETTING & "';", _
+        dbOpenDynaset)
+
+    If rs.EOF Then
+        rs.AddNew
+        rs.Fields("SettingName").value = SUPP_APP_SETTING
+    Else
+        rs.Edit
+    End If
+
+    rs.Fields("SettingValue").value = SUPP_APP_NAME
+    rs.Update
+
+    MsgBox "Companies House API key saved successfully." & vbCrLf & _
+           "Application: " & SUPP_APP_NAME, _
+           vbInformation, "Companies House Setup"
+
+CleanExit:
+    On Error Resume Next
+    If Not rs Is Nothing Then rs.Close
+    Set rs = Nothing
+    Set db = Nothing
+    Exit Sub
+
+ErrorHandler:
+    MsgBox "Could not save the Companies House API key." & vbCrLf & _
+           "Error " & Err.Number & ": " & Err.Description, _
+           vbCritical, "Companies House Setup"
+    Resume CleanExit
+
+End Sub
+
+'------------------------------------------------------------
+' Retrieve the configured API key.
+'------------------------------------------------------------
+Public Function SUPP_GetCompaniesHouseAPIKey() As String
+
+    On Error GoTo ErrorHandler
+
+    Dim db As DAO.Database
+
+    Set db = CurrentDb
+    SUPP_EnsureSettingsTable db
+
+    SUPP_GetCompaniesHouseAPIKey = Nz( _
+        DLookup("SettingValue", SUPP_SETTINGS_TABLE, _
+                "SettingName = '" & SUPP_API_KEY_SETTING & "'"), _
+        vbNullString)
+
+CleanExit:
+    Set db = Nothing
+    Exit Function
+
+ErrorHandler:
+    SUPP_GetCompaniesHouseAPIKey = vbNullString
+    Resume CleanExit
+
+End Function
+
+Private Sub SUPP_EnsureSettingsTable(ByVal db As DAO.Database)
+
+    Dim tdf As DAO.TableDef
+    Dim tableFound As Boolean
+
+    tableFound = False
+
+    For Each tdf In db.TableDefs
+        If StrComp(tdf.Name, SUPP_SETTINGS_TABLE, vbTextCompare) = 0 Then
+            tableFound = True
+            Exit For
+        End If
+    Next tdf
+
+    If Not tableFound Then
+        Set tdf = db.CreateTableDef(SUPP_SETTINGS_TABLE)
+        tdf.Fields.Append tdf.CreateField("SettingName", dbText, 100)
+        tdf.Fields.Append tdf.CreateField("SettingValue", dbMemo)
+        db.TableDefs.Append tdf
+        db.TableDefs.Refresh
+    End If
+
+    Set tdf = Nothing
+
+End Sub
+
+'------------------------------------------------------------
+' Ensure the archive has fields for the Companies House audit.
+' Existing supplier archive fields are not overwritten.
+'------------------------------------------------------------
+Public Sub SUPP_EnsureCompaniesHouseArchiveFields()
+
+    On Error GoTo ErrorHandler
+
+    Dim db As DAO.Database
+    Dim tdf As DAO.TableDef
+
+    Set db = CurrentDb
+    Set tdf = db.TableDefs("SUPP_tblSupplierArchive")
+
+    SUPP_AddArchiveField tdf, "SUPP_CHCompanyName", dbText, 255
+    SUPP_AddArchiveField tdf, "SUPP_CHCompanyNumber", dbText, 30
+    SUPP_AddArchiveField tdf, "SUPP_CHCompanyStatus", dbText, 60
+    SUPP_AddArchiveField tdf, "SUPP_CHCompanyType", dbText, 100
+    SUPP_AddArchiveField tdf, "SUPP_CHRegisteredAddress", dbMemo
+    SUPP_AddArchiveField tdf, "SUPP_CHNumberMatch", dbText, 30
+    SUPP_AddArchiveField tdf, "SUPP_CHNameMatch", dbText, 30
+    SUPP_AddArchiveField tdf, "SUPP_CHValidationResult", dbText, 50
+    SUPP_AddArchiveField tdf, "SUPP_CHAPIStatus", dbText, 100
+    SUPP_AddArchiveField tdf, "SUPP_CHCheckedDate", dbDate
+    SUPP_AddArchiveField tdf, "SUPP_CHReviewedBy", dbText, 100
+    SUPP_AddArchiveField tdf, "SUPP_CHReviewedDate", dbDate
+
+CleanExit:
+    Set tdf = Nothing
+    Set db = Nothing
+    Exit Sub
+
+ErrorHandler:
+    MsgBox "Could not prepare the Companies House archive fields." & vbCrLf & _
+           "Error " & Err.Number & ": " & Err.Description, _
+           vbCritical, "Companies House Setup"
+    Resume CleanExit
+
+End Sub
+
+Private Sub SUPP_AddArchiveField( _
+    ByVal tdf As DAO.TableDef, _
+    ByVal fieldName As String, _
+    ByVal fieldType As DAO.DataTypeEnum, _
+    Optional ByVal fieldSize As Long = 0)
+
+    Dim fld As DAO.Field
+    Dim fieldFound As Boolean
+
+    fieldFound = False
+
+    For Each fld In tdf.Fields
+        If StrComp(fld.Name, fieldName, vbTextCompare) = 0 Then
+            fieldFound = True
+            Exit For
+        End If
+    Next fld
+
+    If Not fieldFound Then
+        If fieldSize > 0 Then
+            tdf.Fields.Append tdf.CreateField(fieldName, fieldType, fieldSize)
+        Else
+            tdf.Fields.Append tdf.CreateField(fieldName, fieldType)
+        End If
+    End If
+
+End Sub
+
+'------------------------------------------------------------
+' Call the Companies House profile endpoint.
+' Returns True only for HTTP 200.
+'------------------------------------------------------------
+Public Function SUPP_GetCompaniesHouseProfile( _
+    ByVal companyNumber As String, _
+    ByRef responseJson As String, _
+    ByRef httpStatus As Long, _
+    ByRef statusMessage As String) As Boolean
+
+    On Error GoTo ErrorHandler
+
+    Dim apiKey As String
+    Dim cleanNumber As String
+    Dim requestUrl As String
+    Dim http As Object
+    Dim authHeader As String
+    Dim requestStage As String
+
+    responseJson = vbNullString
+    httpStatus = 0
+    statusMessage = vbNullString
+    SUPP_GetCompaniesHouseProfile = False
+    requestStage = "validating company number"
+
+    cleanNumber = SUPP_NormaliseCompanyNumber(companyNumber)
+    If Len(cleanNumber) = 0 Then
+        statusMessage = "Company Registration Number is blank."
+        Exit Function
+    End If
+
+    requestStage = "reading the configured API key"
+    apiKey = SUPP_GetCompaniesHouseAPIKey()
+    If Len(apiKey) = 0 Then
+        statusMessage = "Companies House API key is not configured. Run SUPP_SetCompaniesHouseAPIKey."
+        Exit Function
+    End If
+
+    requestUrl = SUPP_COMPANY_API_ROOT & cleanNumber
+
+    requestStage = "encoding the API key for Basic Authentication"
+    authHeader = "Basic " & SUPP_Base64Encode(apiKey & ":")
+
+    requestStage = "creating the WinHTTP request"
+    Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
+
+    requestStage = "setting request timeouts"
+    http.SetTimeouts 5000, 5000, 15000, 15000
+
+    requestStage = "opening " & requestUrl
+    http.Open "GET", requestUrl, False
+
+    requestStage = "setting Accept header"
+    http.SetRequestHeader "Accept", "application/json"
+
+    requestStage = "setting Authorization header"
+    http.SetRequestHeader "Authorization", authHeader
+
+    requestStage = "sending request"
+    http.Send
+
+    requestStage = "reading HTTP status"
+    httpStatus = CLng(http.Status)
+
+    requestStage = "reading response body"
+    responseJson = CStr(http.ResponseText)
+
+    Select Case httpStatus
+        Case 200
+            statusMessage = "Companies House returned a company profile."
+            SUPP_GetCompaniesHouseProfile = True
+        Case 401
+            statusMessage = "Companies House rejected the API key (HTTP 401). Check the key stored in Access."
+        Case 404
+            statusMessage = "Companies House could not find this company number (HTTP 404)."
+        Case 429
+            statusMessage = "Companies House rate limit reached (HTTP 429). Try again later."
+        Case Else
+            statusMessage = "Companies House returned HTTP " & CStr(httpStatus) & "."
+    End Select
+
+CleanExit:
+    On Error Resume Next
+    Set http = Nothing
+    Exit Function
+
+ErrorHandler:
+    statusMessage = "Companies House request failed while " & requestStage & _
+                    ". Error " & Err.Number & ": " & Err.Description
+    SUPP_GetCompaniesHouseProfile = False
+    Resume CleanExit
+
+End Function
+
+'------------------------------------------------------------
+' Companies House company numbers are treated as text.
+' Numeric values shorter than eight digits are zero-padded.
+' Non-numeric prefixes are retained as entered.
+'------------------------------------------------------------
+Public Function SUPP_NormaliseCompanyNumber(ByVal companyNumber As String) As String
+
+    Dim result As String
+
+    result = UCase$(Replace(Trim$(companyNumber), " ", vbNullString))
+
+    If Len(result) > 0 And Len(result) <= 8 Then
+        If result Like String$(Len(result), "#") Then
+            result = String$(8 - Len(result), "0") & result
+        End If
+    End If
+
+    SUPP_NormaliseCompanyNumber = result
+
+End Function
+
+Public Function SUPP_NormaliseCompanyName(ByVal companyName As String) As String
+
+    Dim result As String
+
+    result = UCase$(Trim$(companyName))
+
+    Do While InStr(result, "  ") > 0
+        result = Replace(result, "  ", " ")
+    Loop
+
+    SUPP_NormaliseCompanyName = result
+
+End Function
+
+'------------------------------------------------------------
+' Extract a simple JSON string property by property name.
+' Uses late-bound VBScript.RegExp, so no reference is required.
+'------------------------------------------------------------
+Public Function SUPP_JsonStringValue( _
+    ByVal jsonText As String, _
+    ByVal propertyName As String) As String
+
+    On Error GoTo SafeExit
+
+    Dim re As Object
+    Dim matches As Object
+    Dim pattern As String
+
+    Set re = CreateObject("VBScript.RegExp")
+
+    'VBScript.RegExp supports ordinary capturing groups, not the newer
+    'non-capturing (?:...) syntax. The outer group captures the whole value.
+    pattern = Chr$(34) & propertyName & Chr$(34) & _
+              "\s*:\s*" & Chr$(34) & _
+              "((\\.|[^" & Chr$(34) & "\\])*)" & Chr$(34)
+
+    re.Global = False
+    re.IgnoreCase = True
+    re.multiLine = True
+    re.pattern = pattern
+
+    If re.Test(jsonText) Then
+        Set matches = re.Execute(jsonText)
+        SUPP_JsonStringValue = SUPP_JsonUnescape(CStr(matches(0).SubMatches(0)))
+    End If
+
+SafeExit:
+    Set matches = Nothing
+    Set re = Nothing
+
+End Function
+
+Private Function SUPP_JsonUnescape(ByVal value As String) As String
+
+    On Error GoTo SafeExit
+
+    Dim re As Object
+    Dim matches As Object
+    Dim m As Object
+    Dim codePoint As Long
+
+    'Decode Unicode escape sequences such as \u00E9.
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = False
+    re.IgnoreCase = True
+    re.pattern = "\\u([0-9A-Fa-f]{4})"
+
+    Do While re.Test(value)
+        Set matches = re.Execute(value)
+        Set m = matches(0)
+        codePoint = CLng("&H" & m.SubMatches(0))
+        If codePoint > 32767 Then codePoint = codePoint - 65536
+        value = Left$(value, m.FirstIndex) & ChrW$(codePoint) & _
+                Mid$(value, m.FirstIndex + m.Length + 1)
+    Loop
+
+    value = Replace(value, Chr$(92) & Chr$(34), Chr$(34))
+    value = Replace(value, Chr$(92) & "/", "/")
+    value = Replace(value, Chr$(92) & "n", vbCrLf)
+    value = Replace(value, Chr$(92) & "r", vbCr)
+    value = Replace(value, Chr$(92) & "t", vbTab)
+    value = Replace(value, Chr$(92) & Chr$(92), Chr$(92))
+
+    SUPP_JsonUnescape = value
+
+SafeExit:
+    Set m = Nothing
+    Set matches = Nothing
+    Set re = Nothing
+
+End Function
+
+'------------------------------------------------------------
+' Build a readable registered-office address from the profile JSON.
+'------------------------------------------------------------
+Public Function SUPP_JsonCompanyAddress(ByVal jsonText As String) As String
+
+    Dim result As String
+
+    SUPP_AppendAddressPart result, SUPP_JsonStringValue(jsonText, "premises")
+    SUPP_AppendAddressPart result, SUPP_JsonStringValue(jsonText, "address_line_1")
+    SUPP_AppendAddressPart result, SUPP_JsonStringValue(jsonText, "address_line_2")
+    SUPP_AppendAddressPart result, SUPP_JsonStringValue(jsonText, "locality")
+    SUPP_AppendAddressPart result, SUPP_JsonStringValue(jsonText, "region")
+    SUPP_AppendAddressPart result, SUPP_JsonStringValue(jsonText, "postal_code")
+    SUPP_AppendAddressPart result, SUPP_JsonStringValue(jsonText, "country")
+
+    SUPP_JsonCompanyAddress = result
+
+End Function
+
+Private Sub SUPP_AppendAddressPart(ByRef result As String, ByVal part As String)
+
+    part = Trim$(part)
+
+    If Len(part) = 0 Then Exit Sub
+
+    If Len(result) > 0 Then result = result & vbCrLf
+    result = result & part
+
+End Sub
+
+'------------------------------------------------------------
+' Base64 encoder for the HTTP Basic Authentication header.
+'------------------------------------------------------------
+Private Function SUPP_Base64Encode(ByVal plainText As String) As String
+
+    Dim xmlDoc As Object
+    Dim xmlNode As Object
+
+    Set xmlDoc = CreateObject("MSXML2.DOMDocument.6.0")
+    Set xmlNode = xmlDoc.createElement("base64")
+
+    xmlNode.DataType = "bin.base64"
+    xmlNode.nodeTypedValue = StrConv(plainText, vbFromUnicode)
+
+    SUPP_Base64Encode = Replace(Replace(xmlNode.Text, vbCr, vbNullString), vbLf, vbNullString)
+
+    Set xmlNode = Nothing
+    Set xmlDoc = Nothing
+
+End Function
+
+'------------------------------------------------------------
+' Helper: create a multiline submitted address from archive fields.
+'------------------------------------------------------------
+Public Function SUPP_GetSubmittedAddress(ByVal archiveID As Long) As String
+
+    On Error GoTo SafeExit
+
+    Dim rs As DAO.Recordset
+    Dim sql As String
+    Dim result As String
+
+    sql = "SELECT [NewAddress], [NewAddress-City], [NewAddress-County], " & _
+          "[NewAddress-State], [NewAddress-Country], [NewPostCode], " & _
+          "[CurrentAddress], [CurrentAddress-City], [CurrentAddress-County], " & _
+          "[CurrentAddress-State], [CurrentAddress-Country], [CurrentPostCode] " & _
+          "FROM [SUPP_tblSupplierArchive] WHERE [ID] = " & CStr(archiveID) & ";"
+
+    Set rs = CurrentDb.OpenRecordset(sql, dbOpenSnapshot)
+
+    If Not rs.EOF Then
+        SUPP_AppendAddressPart result, SUPP_NewOrCurrent(rs, "NewAddress", "CurrentAddress")
+        SUPP_AppendAddressPart result, SUPP_NewOrCurrent(rs, "NewAddress-City", "CurrentAddress-City")
+        SUPP_AppendAddressPart result, SUPP_NewOrCurrent(rs, "NewAddress-County", "CurrentAddress-County")
+        SUPP_AppendAddressPart result, SUPP_NewOrCurrent(rs, "NewAddress-State", "CurrentAddress-State")
+        SUPP_AppendAddressPart result, SUPP_NewOrCurrent(rs, "NewPostCode", "CurrentPostCode")
+        SUPP_AppendAddressPart result, SUPP_NewOrCurrent(rs, "NewAddress-Country", "CurrentAddress-Country")
+    End If
+
+    SUPP_GetSubmittedAddress = result
+
+SafeExit:
+    On Error Resume Next
+    If Not rs Is Nothing Then rs.Close
+    Set rs = Nothing
+
+End Function
+
+Private Function SUPP_NewOrCurrent( _
+    ByVal rs As DAO.Recordset, _
+    ByVal newField As String, _
+    ByVal currentField As String) As String
+
+    Dim newValue As String
+
+    newValue = Trim$(Nz(rs.Fields(newField).Value, vbNullString))
+
+    If Len(newValue) > 0 Then
+        SUPP_NewOrCurrent = newValue
+    Else
+        SUPP_NewOrCurrent = Trim$(Nz(rs.Fields(currentField).Value, vbNullString))
+    End If
+
+End Function

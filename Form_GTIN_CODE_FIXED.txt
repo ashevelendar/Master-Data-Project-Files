@@ -1,0 +1,339 @@
+VERSION 1.0 CLASS
+BEGIN
+  MultiUse = -1  'True
+END
+Attribute VB_Name = "Form_GTIN"
+Attribute VB_GlobalNameSpace = False
+Attribute VB_Creatable = True
+Attribute VB_PredeclaredId = True
+Attribute VB_Exposed = False
+Option Compare Database
+Option Explicit
+
+'============================================================
+' CODE BEHIND THE REPURPOSED GTIN FORM
+' Form name: GTIN
+' Subform control: SUPP_subCompanyComparison
+' Subform object: ExistingItemGTIN
+'
+' Paste this into the GTIN form's code module after running
+' SUPP_BuildCompaniesHouseInterface.
+'============================================================
+
+Private mArchiveID As Long
+Private mCompanyNumber As String
+Private mHttpStatus As Long
+Private mStatusMessage As String
+Private mResponseJson As String
+Private mCompanyName As String
+Private mReturnedCompanyNumber As String
+Private mCompanyStatus As String
+Private mCompanyType As String
+Private mRegisteredAddress As String
+Private mNumberMatch As String
+Private mNameMatch As String
+Private mStatusCheck As String
+Private mOverallResult As String
+
+Private Sub Form_Load()
+
+    On Error GoTo FormError
+
+    Dim incomingID As String
+
+    'First attempt: receive the ID through OpenArgs.
+    incomingID = Nz(Me.OpenArgs, vbNullString)
+
+    'Fallback: retrieve the ID from TempVars.
+    If Len(Trim$(incomingID)) = 0 Or Not IsNumeric(incomingID) Then
+
+        On Error Resume Next
+        incomingID = CStr(TempVars("SUPP_CompaniesHouseArchiveID").value)
+        On Error GoTo FormError
+
+    End If
+
+    If Len(Trim$(incomingID)) = 0 Or Not IsNumeric(incomingID) Then
+
+        MsgBox "The supplier archive record could not be identified." & _
+               vbCrLf & "Please return to Main and try again.", _
+               vbExclamation, "Companies House Verification"
+
+        DoCmd.Close acForm, Me.Name
+        Exit Sub
+
+    End If
+
+    mArchiveID = CLng(incomingID)
+
+    'Remove the temporary value once received.
+    On Error Resume Next
+    TempVars.Remove "SUPP_CompaniesHouseArchiveID"
+    On Error GoTo FormError
+
+    SUPP_EnsureCompaniesHouseArchiveFields
+    LoadSubmittedSupplierDetails
+
+    'Let Access display the form before starting the HTTP lookup.
+    Me.TimerInterval = 500
+
+    Exit Sub
+
+FormError:
+
+    MsgBox "Companies House form could not be loaded." & vbCrLf & _
+           "Error " & Err.Number & ": " & Err.Description, _
+           vbCritical, "Companies House Verification"
+
+End Sub
+
+Private Sub Form_Timer()
+
+    'Run once after the form has had time to display.
+    Me.TimerInterval = 0
+    RunCompaniesHouseLookup
+
+End Sub
+
+Private Sub LoadSubmittedSupplierDetails()
+
+    On Error GoTo LoadError
+
+    Dim rs As DAO.Recordset
+    Dim sql As String
+    Dim submittedName As String
+    Dim companyNumberValue As String
+
+    sql = "SELECT * FROM [SUPP_tblSupplierArchive] WHERE [ID] = " & _
+          CStr(mArchiveID) & ";"
+
+    Set rs = CurrentDb.OpenRecordset(sql, dbOpenSnapshot)
+
+    If rs.EOF Then
+        MsgBox "The supplier could not be found in the archive.", _
+               vbExclamation, "Companies House Verification"
+        DoCmd.Close acForm, Me.Name
+        GoTo CleanExit
+    End If
+
+    Me.txtRequestRef.value = Nz(rs.Fields("Title").value, vbNullString)
+
+    Me.txtSubmittedAddress.value = SUPP_GetSubmittedAddress(mArchiveID)
+
+    submittedName = SUPP_RecordsetText(rs, "SupplierKnownAsName")
+    If Len(Trim$(submittedName)) = 0 Then submittedName = SUPP_RecordsetText(rs, "AXSupplierName")
+    If Len(Trim$(submittedName)) = 0 Then submittedName = SUPP_RecordsetText(rs, "CompanyName")
+
+    companyNumberValue = SUPP_RecordsetText(rs, "CompanyRegistrationNo")
+    mCompanyNumber = SUPP_NormaliseCompanyNumber(companyNumberValue)
+
+    With Me.SUPP_subCompanyComparison.Form
+        .Controls("txtSupplierName").value = submittedName
+        .Controls("txtCompanyRegistrationNumber").value = mCompanyNumber
+        .Controls("txtRegisteredName").value = Null
+        .Controls("txtCompanyStatus").value = Null
+    End With
+
+    Me.txtRegisteredAddress.value = Null
+    
+
+CleanExit:
+    On Error Resume Next
+    If Not rs Is Nothing Then rs.Close
+    Set rs = Nothing
+    Exit Sub
+
+LoadError:
+    MsgBox "Could not load the submitted supplier information." & vbCrLf & _
+           "Error " & Err.Number & ": " & Err.Description, _
+           vbCritical, "Companies House Verification"
+    Resume CleanExit
+    
+    
+
+End Sub
+
+Private Function SUPP_RecordsetText(ByVal rs As DAO.Recordset, _
+                                    ByVal fieldName As String) As String
+    On Error GoTo SafeExit
+    SUPP_RecordsetText = Nz(rs.Fields(fieldName).value, vbNullString)
+SafeExit:
+End Function
+
+Private Sub RunCompaniesHouseLookup()
+
+    On Error GoTo LookupError
+
+    Dim apiCallSucceeded As Boolean
+    Dim submittedName As String
+
+    mHttpStatus = 0
+    mResponseJson = vbNullString
+    mStatusMessage = vbNullString
+    mCompanyName = vbNullString
+    mReturnedCompanyNumber = vbNullString
+    mCompanyStatus = vbNullString
+    mCompanyType = vbNullString
+    mRegisteredAddress = vbNullString
+    mNumberMatch = "NOT CHECKED"
+    mNameMatch = "NOT CHECKED"
+    mStatusCheck = "NOT CHECKED"
+    mOverallResult = "CHECK IN PROGRESS"
+
+    Me.txtCHLookupStatus.value = "Contacting Companies House..."
+    Me.txtRegisteredAddress.value = Null
+    Me.txtCHNumberResult.value = "NOT CHECKED"
+    Me.txtCHNameResult.value = "NOT CHECKED"
+    Me.txtCHStatusResult.value = "NOT CHECKED"
+    Me.txtCHOverallResult.value = mOverallResult
+
+    If Len(Trim$(mCompanyNumber)) = 0 Then
+        mStatusMessage = "Company Registration Number is mandatory."
+        mOverallResult = "VALIDATION STOPPED"
+        Me.txtCHLookupStatus.value = mStatusMessage
+        Me.txtCHOverallResult.value = mOverallResult
+        SaveCompaniesHouseAudit
+        Exit Sub
+    End If
+
+    apiCallSucceeded = SUPP_GetCompaniesHouseProfile( _
+        mCompanyNumber, mResponseJson, mHttpStatus, mStatusMessage)
+
+    If Not apiCallSucceeded Then
+        mOverallResult = "LOOKUP FAILED"
+        Me.txtCHLookupStatus.value = mStatusMessage
+        Me.txtCHOverallResult.value = mOverallResult
+        SaveCompaniesHouseAudit
+        Exit Sub
+    End If
+
+    mCompanyName = SUPP_JsonStringValue(mResponseJson, "company_name")
+    mReturnedCompanyNumber = SUPP_JsonStringValue(mResponseJson, "company_number")
+    mCompanyStatus = SUPP_JsonStringValue(mResponseJson, "company_status")
+    mCompanyType = SUPP_JsonStringValue(mResponseJson, "type")
+    mRegisteredAddress = SUPP_JsonCompanyAddress(mResponseJson)
+
+    With Me.SUPP_subCompanyComparison.Form
+        .Controls("txtRegisteredName").value = mCompanyName
+        .Controls("txtCompanyStatus").value = mCompanyStatus
+    End With
+
+    Me.txtRegisteredAddress.value = mRegisteredAddress
+
+    submittedName = Nz(Me.SUPP_subCompanyComparison.Form.Controls("txtSupplierName").value, vbNullString)
+
+    If SUPP_NormaliseCompanyNumber(mCompanyNumber) = _
+       SUPP_NormaliseCompanyNumber(mReturnedCompanyNumber) Then
+        mNumberMatch = "MATCH"
+    Else
+        mNumberMatch = "MISMATCH"
+    End If
+
+    If SUPP_NormaliseCompanyName(submittedName) = _
+       SUPP_NormaliseCompanyName(mCompanyName) And Len(mCompanyName) > 0 Then
+        mNameMatch = "MATCH"
+    Else
+        mNameMatch = "REVIEW REQUIRED"
+    End If
+
+    If LCase$(Trim$(mCompanyStatus)) = "active" Then
+        mStatusCheck = "ACTIVE"
+    Else
+        mStatusCheck = "REVIEW REQUIRED"
+    End If
+
+    If mNumberMatch = "MATCH" And _
+       mNameMatch = "MATCH" And _
+       mStatusCheck = "ACTIVE" Then
+        mOverallResult = "PASS"
+    Else
+        mOverallResult = "REVIEW REQUIRED"
+    End If
+
+    Me.txtCHNumberResult.value = mNumberMatch
+    Me.txtCHNameResult.value = mNameMatch
+    Me.txtCHStatusResult.value = mStatusCheck
+    Me.txtCHOverallResult.value = mOverallResult
+    Me.txtCHLookupStatus.value = mStatusMessage
+
+    SaveCompaniesHouseAudit
+    Exit Sub
+
+LookupError:
+    mStatusMessage = "The Companies House lookup could not be completed. Error " & _
+                     Err.Number & ": " & Err.Description
+    mOverallResult = "LOOKUP FAILED"
+
+    On Error Resume Next
+    Me.txtCHLookupStatus.value = mStatusMessage
+    Me.txtCHOverallResult.value = mOverallResult
+    SaveCompaniesHouseAudit
+
+End Sub
+
+Private Sub SaveCompaniesHouseAudit()
+
+    On Error GoTo SaveError
+
+    Dim rs As DAO.Recordset
+
+    Set rs = CurrentDb.OpenRecordset( _
+        "SELECT * FROM [SUPP_tblSupplierArchive] WHERE [ID] = " & _
+        CStr(mArchiveID) & ";", dbOpenDynaset)
+
+    If rs.EOF Then GoTo CleanExit
+
+    rs.Edit
+    rs.Fields("SUPP_CHCompanyName").value = SUPP_NullIfBlank(mCompanyName)
+    rs.Fields("SUPP_CHCompanyNumber").value = SUPP_NullIfBlank(mReturnedCompanyNumber)
+    rs.Fields("SUPP_CHCompanyStatus").value = SUPP_NullIfBlank(mCompanyStatus)
+    rs.Fields("SUPP_CHCompanyType").value = SUPP_NullIfBlank(mCompanyType)
+    rs.Fields("SUPP_CHRegisteredAddress").value = SUPP_NullIfBlank(mRegisteredAddress)
+    rs.Fields("SUPP_CHNumberMatch").value = mNumberMatch
+    rs.Fields("SUPP_CHNameMatch").value = mNameMatch
+    rs.Fields("SUPP_CHValidationResult").value = mOverallResult
+    rs.Fields("SUPP_CHAPIStatus").value = _
+        IIf(mHttpStatus > 0, CStr(mHttpStatus) & " - ", vbNullString) & mStatusMessage
+    rs.Fields("SUPP_CHCheckedDate").value = Now()
+    rs.Update
+
+CleanExit:
+    On Error Resume Next
+    If Not rs Is Nothing Then rs.Close
+    Set rs = Nothing
+    Exit Sub
+
+SaveError:
+    MsgBox "The Companies House result was retrieved but could not be saved." & _
+           vbCrLf & "Error " & Err.Number & ": " & Err.Description, _
+           vbExclamation, "Companies House Audit"
+    Resume CleanExit
+
+End Sub
+
+Private Function SUPP_NullIfBlank(ByVal value As String) As Variant
+    If Len(Trim$(value)) = 0 Then
+        SUPP_NullIfBlank = Null
+    Else
+        SUPP_NullIfBlank = value
+    End If
+End Function
+
+Private Sub cmdRetryLookup_Click()
+    RunCompaniesHouseLookup
+End Sub
+
+Private Sub cmdOpenCompaniesHouse_Click()
+
+    If Len(mCompanyNumber) = 0 Then Exit Sub
+
+    Application.FollowHyperlink _
+        "https://find-and-update.company-information.service.gov.uk/company/" & _
+        SUPP_NormaliseCompanyNumber(mCompanyNumber)
+
+End Sub
+
+Private Sub cmdClose_Click()
+    DoCmd.Close acForm, Me.Name
+End Sub
+

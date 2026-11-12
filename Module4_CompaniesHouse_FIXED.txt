@@ -469,19 +469,81 @@ End Sub
 '------------------------------------------------------------
 Private Function SUPP_Base64Encode(ByVal plainText As String) As String
 
-    Dim xmlDoc As Object
-    Dim xmlNode As Object
+    'Pure VBA Base64 encoder. Avoids MSXML byte-array conversion,
+    'which can raise error -2147024809 in some Access environments.
+    'Companies House API keys are ASCII characters.
 
-    Set xmlDoc = CreateObject("MSXML2.DOMDocument.6.0")
-    Set xmlNode = xmlDoc.createElement("base64")
+    Const BASE64_CHARS As String = _
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
-    xmlNode.DataType = "bin.base64"
-    xmlNode.nodeTypedValue = StrConv(plainText, vbFromUnicode)
+    Dim result As String
+    Dim i As Long
+    Dim b1 As Long
+    Dim b2 As Long
+    Dim b3 As Long
+    Dim idx1 As Long
+    Dim idx2 As Long
+    Dim idx3 As Long
+    Dim idx4 As Long
+    Dim charCode As Long
 
-    SUPP_Base64Encode = Replace(Replace(xmlNode.Text, vbCr, vbNullString), vbLf, vbNullString)
+    result = vbNullString
+    i = 1
 
-    Set xmlNode = Nothing
-    Set xmlDoc = Nothing
+    Do While i <= Len(plainText)
+
+        charCode = AscW(Mid$(plainText, i, 1))
+        If charCode < 0 Or charCode > 127 Then
+            Err.Raise vbObjectError + 1001, "SUPP_Base64Encode", _
+                      "API key contains a non-ASCII character."
+        End If
+        b1 = charCode
+
+        b2 = 0
+        b3 = 0
+
+        If i + 1 <= Len(plainText) Then
+            charCode = AscW(Mid$(plainText, i + 1, 1))
+            If charCode < 0 Or charCode > 127 Then
+                Err.Raise vbObjectError + 1002, "SUPP_Base64Encode", _
+                          "API key contains a non-ASCII character."
+            End If
+            b2 = charCode
+        End If
+
+        If i + 2 <= Len(plainText) Then
+            charCode = AscW(Mid$(plainText, i + 2, 1))
+            If charCode < 0 Or charCode > 127 Then
+                Err.Raise vbObjectError + 1003, "SUPP_Base64Encode", _
+                          "API key contains a non-ASCII character."
+            End If
+            b3 = charCode
+        End If
+
+        idx1 = (b1 \ 4) + 1
+        idx2 = (((b1 And 3) * 16) + (b2 \ 16)) + 1
+        idx3 = (((b2 And 15) * 4) + (b3 \ 64)) + 1
+        idx4 = (b3 And 63) + 1
+
+        result = result & Mid$(BASE64_CHARS, idx1, 1)
+        result = result & Mid$(BASE64_CHARS, idx2, 1)
+
+        If i + 1 <= Len(plainText) Then
+            result = result & Mid$(BASE64_CHARS, idx3, 1)
+        Else
+            result = result & "="
+        End If
+
+        If i + 2 <= Len(plainText) Then
+            result = result & Mid$(BASE64_CHARS, idx4, 1)
+        Else
+            result = result & "="
+        End If
+
+        i = i + 3
+    Loop
+
+    SUPP_Base64Encode = result
 
 End Function
 

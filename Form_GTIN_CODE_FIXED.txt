@@ -193,6 +193,7 @@ Private Sub RunCompaniesHouseLookup()
         Me.txtCHLookupStatus.value = mStatusMessage
         Me.txtCHOverallResult.value = mOverallResult
         SaveCompaniesHouseAudit
+        RunAXDuplicateCheck
         Exit Sub
     End If
 
@@ -257,6 +258,7 @@ Private Sub RunCompaniesHouseLookup()
     Me.txtCHLookupStatus.value = mStatusMessage
 
     SaveCompaniesHouseAudit
+    RunAXDuplicateCheck
     Exit Sub
 
 LookupError:
@@ -268,6 +270,7 @@ LookupError:
     Me.txtCHLookupStatus.value = mStatusMessage
     Me.txtCHOverallResult.value = mOverallResult
     SaveCompaniesHouseAudit
+    RunAXDuplicateCheck
 
 End Sub
 
@@ -337,3 +340,32 @@ Private Sub cmdClose_Click()
     DoCmd.Close acForm, Me.Name
 End Sub
 
+
+
+Private Sub RunAXDuplicateCheck()
+
+    On Error GoTo DuplicateError
+
+    Dim duplicateResult As String
+    Dim currentMessage As String
+
+    duplicateResult = SUPP_CheckAXSupplierDuplicates(mArchiveID)
+    currentMessage = Nz(Me.txtCHLookupStatus.Value, vbNullString)
+
+    Me.txtCHLookupStatus.Value = currentMessage & vbCrLf & _
+        "AX duplicate check: " & duplicateResult
+
+    If duplicateResult = "DUPLICATE FOUND" Then
+        Me.txtCHOverallResult.Value = "DUPLICATE FOUND"
+    ElseIf duplicateResult = "CHECK FAILED" Then
+        Me.txtCHOverallResult.Value = "REVIEW REQUIRED"
+    End If
+
+    Exit Sub
+
+DuplicateError:
+    MsgBox "The AX duplicate check could not be completed." & vbCrLf & _
+           "Error " & Err.Number & ": " & Err.Description, _
+           vbExclamation, "AX Duplicate Check"
+
+End Sub

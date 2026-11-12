@@ -178,6 +178,9 @@ Public Sub SUPP_EnsureCompaniesHouseArchiveFields()
     SUPP_AddArchiveField tdf, "SUPP_CHCheckedDate", dbDate
     SUPP_AddArchiveField tdf, "SUPP_CHReviewedBy", dbText, 100
     SUPP_AddArchiveField tdf, "SUPP_CHReviewedDate", dbDate
+    SUPP_AddArchiveField tdf, "SUPP_AXDuplicateResult", dbText, 40
+    SUPP_AddArchiveField tdf, "SUPP_AXDuplicateDetails", dbMemo
+    SUPP_AddArchiveField tdf, "SUPP_AXDuplicateCheckedDate", dbDate
 
 CleanExit:
     Set tdf = Nothing
@@ -323,7 +326,11 @@ Public Function SUPP_NormaliseCompanyNumber(ByVal companyNumber As String) As St
 
     Dim result As String
 
-    result = UCase$(Replace(Trim$(companyNumber), " ", vbNullString))
+    result = UCase$(Trim$(companyNumber))
+    result = Replace(result, " ", vbNullString)
+    result = Replace(result, "-", vbNullString)
+    result = Replace(result, "/", vbNullString)
+    result = Replace(result, ".", vbNullString)
 
     If Len(result) > 0 And Len(result) <= 8 Then
         If result Like String$(Len(result), "#") Then
@@ -529,5 +536,171 @@ Private Function SUPP_NewOrCurrent( _
     Else
         SUPP_NewOrCurrent = Trim$(Nz(rs.Fields(currentField).Value, vbNullString))
     End If
+
+End Function
+
+'============================================================
+' AX DUPLICATE CHECK
+'
+' Searches the complete linked dbo_VENDTABLE across ALL
+' legal entities. There is deliberately no DATAAREAID filter.
+'
+' Checks:
+'   ACCOUNTNUM          against the assigned AX supplier code
+'   ORGANIZATIONNUMBER  against the Companies House number
+'
+' Results are written to SUPP_tblSupplierArchive.
+'============================================================
+Public Function SUPP_CheckAXSupplierDuplicates(ByVal archiveID As Long) As String
+
+    On Error GoTo ErrorHandler
+
+    Dim db As DAO.Database
+    Dim rsArchive As DAO.Recordset
+    Dim rsAX As DAO.Recordset
+    Dim sql As String
+    Dim proposedAXCode As String
+    Dim proposedOrgNumber As String
+    Dim existingAXCode As String
+    Dim existingOrgNumber As String
+    Dim legalEntity As String
+    Dim details As String
+    Dim accountMatch As Boolean
+    Dim orgMatch As Boolean
+    Dim foundDuplicate As Boolean
+    Dim matchCount As Long
+    Dim resultText As String
+
+    Set db = CurrentDb
+
+    'Ensure the audit fields exist before attempting the check.
+    SUPP_EnsureCompaniesHouseArchiveFields
+
+    sql = "SELECT [AXSupplierCode], [CompanyRegistrationNo] " & _
+          "FROM [SUPP_tblSupplierArchive] WHERE [ID] = " & CStr(archiveID) & ";"
+
+    Set rsArchive = db.OpenRecordset(sql, dbOpenSnapshot)
+
+    If rsArchive.EOF Then
+        Err.Raise vbObjectError + 2100, "SUPP_CheckAXSupplierDuplicates", _
+                  "The supplier archive record could not be found."
+    End If
+
+    proposedAXCode = Trim$(Nz(rsArchive.Fields("AXSupplierCode").Value, vbNullString))
+    proposedOrgNumber = SUPP_NormaliseCompanyNumber( _
+        Nz(rsArchive.Fields("CompanyRegistrationNo").Value, vbNullString))
+
+    rsArchive.Close
+    Set rsArchive = Nothing
+
+    If Len(proposedAXCode) = 0 And Len(proposedOrgNumber) = 0 Then
+        resultText = "NOT CHECKED"
+        details = "No AX supplier code or company registration number was available."
+        GoTo SaveResult
+    End If
+
+    'Read all legal entities. Do not add a DATAAREAID condition here.
+    sql = "SELECT [ACCOUNTNUM], [ORGANIZATIONNUMBER], [DATAAREAID] " & _
+          "FROM [dbo_VENDTABLE];"
+
+    Set rsAX = db.OpenRecordset(sql, dbOpenSnapshot)
+
+    Do While Not rsAX.EOF
+
+        existingAXCode = Trim$(Nz(rsAX.Fields("ACCOUNTNUM").Value, vbNullString))
+        existingOrgNumber = SUPP_NormaliseCompanyNumber( _
+            Nz(rsAX.Fields("ORGANIZATIONNUMBER").Value, vbNullString))
+        legalEntity = Trim$(Nz(rsAX.Fields("DATAAREAID").Value, vbNullString))
+
+        accountMatch = (Len(proposedAXCode) > 0 And _
+                        StrComp(existingAXCode, proposedAXCode, vbTextCompare) = 0)
+
+        orgMatch = (Len(proposedOrgNumber) > 0 And _
+                    Len(existingOrgNumber) > 0 And _
+                    StrComp(existingOrgNumber, proposedOrgNumber, vbTextCompare) = 0)
+
+        If accountMatch Or orgMatch Then
+
+            foundDuplicate = True
+            matchCount = matchCount + 1
+
+            If Len(details) > 0 Then details = details & vbCrLf
+
+            details = details & "DATAAREAID " & legalEntity & _
+                      " | ACCOUNTNUM " & existingAXCode & _
+                      " | ORGANIZATIONNUMBER " & Nz(rsAX.Fields("ORGANIZATIONNUMBER").Value, vbNullString)
+
+            If accountMatch And orgMatch Then
+                details = details & " | AX code and organisation number match"
+            ElseIf accountMatch Then
+                details = details & " | AX supplier code match"
+            Else
+                details = details & " | Organisation number match"
+            End If
+
+        End If
+
+        rsAX.MoveNext
+    Loop
+
+    If foundDuplicate Then
+        resultText = "DUPLICATE FOUND"
+        details = CStr(matchCount) & " matching AX record(s) found across all legal entities." & _
+                  vbCrLf & details
+    Else
+        resultText = "PASS"
+        details = "No matching ACCOUNTNUM or ORGANIZATIONNUMBER found in dbo_VENDTABLE across any legal entity."
+    End If
+
+SaveResult:
+
+    If Not rsAX Is Nothing Then
+        rsAX.Close
+        Set rsAX = Nothing
+    End If
+
+    Set rsArchive = db.OpenRecordset( _
+        "SELECT * FROM [SUPP_tblSupplierArchive] WHERE [ID] = " & _
+        CStr(archiveID) & ";", dbOpenDynaset)
+
+    If Not rsArchive.EOF Then
+        rsArchive.Edit
+        rsArchive.Fields("SUPP_AXDuplicateResult").Value = resultText
+        rsArchive.Fields("SUPP_AXDuplicateDetails").Value = details
+        rsArchive.Fields("SUPP_AXDuplicateCheckedDate").Value = Now()
+        rsArchive.Update
+    End If
+
+    SUPP_CheckAXSupplierDuplicates = resultText
+
+CleanExit:
+    On Error Resume Next
+    If Not rsArchive Is Nothing Then rsArchive.Close
+    If Not rsAX Is Nothing Then rsAX.Close
+    Set rsArchive = Nothing
+    Set rsAX = Nothing
+    Set db = Nothing
+    Exit Function
+
+ErrorHandler:
+    resultText = "CHECK FAILED"
+    details = "AX duplicate check failed. Error " & Err.Number & ": " & Err.Description
+
+    On Error Resume Next
+    If db Is Nothing Then Set db = CurrentDb
+    Set rsArchive = db.OpenRecordset( _
+        "SELECT * FROM [SUPP_tblSupplierArchive] WHERE [ID] = " & _
+        CStr(archiveID) & ";", dbOpenDynaset)
+
+    If Not rsArchive.EOF Then
+        rsArchive.Edit
+        rsArchive.Fields("SUPP_AXDuplicateResult").Value = resultText
+        rsArchive.Fields("SUPP_AXDuplicateDetails").Value = details
+        rsArchive.Fields("SUPP_AXDuplicateCheckedDate").Value = Now()
+        rsArchive.Update
+    End If
+
+    SUPP_CheckAXSupplierDuplicates = resultText
+    Resume CleanExit
 
 End Function

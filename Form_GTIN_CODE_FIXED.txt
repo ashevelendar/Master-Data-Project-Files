@@ -205,6 +205,7 @@ Private Sub RunCompaniesHouseLookup()
         Me.txtCHLookupStatus.value = mStatusMessage
         Me.txtCHOverallResult.value = mOverallResult
         SaveCompaniesHouseAudit
+        RunAXDuplicateCheck
         Exit Sub
     End If
 

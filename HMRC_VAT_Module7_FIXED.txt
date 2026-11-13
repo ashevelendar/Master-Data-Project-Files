@@ -1,0 +1,483 @@
+Option Compare Database
+Option Explicit
+
+'============================================================
+' HMRC VAT WEB-FORM CHECKER
+'
+' Experimental browser-form integration.
+' This is NOT an official HMRC API.
+'
+' Main entry point: RUN_HMRC_VAT_TEST
+'
+' Uses built-in WinHTTP and VBScript.RegExp only.
+' Does not require Selenium or external references.
+'
+' Important:
+' - HTTP 200 alone is not a successful VAT check.
+' - A result is only reported as confirmed when the returned
+'   page contains recognisable result information.
+' - Redirects are followed only over HTTPS to *.gov.uk hosts.
+' - Cookies and CSRF tokens are never written to the report.
+'============================================================
+
+Private Const HMRC_FORM_URL As String = _
+    "https://www.tax.service.gov.uk/check-vat-number/enter-vat-details"
+
+Private Const HMRC_HOST As String = "www.tax.service.gov.uk"
+
+Private Const HMRC_USER_AGENT As String = _
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " & _
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+Public Sub RUN_HMRC_VAT_TEST()
+
+    On Error GoTo ErrorHandler
+
+    Dim http As Object
+    Dim fso As Object
+    Dim reportFile As Object
+    Dim html As String
+    Dim response As String
+    Dim responseHeaders As String
+    Dim cookies As String
+    Dim newCookies As String
+    Dim csrfToken As String
+    Dim vatNumber As String
+    Dim postData As String
+    Dim postStatus As Long
+    Dim postStatusText As String
+    Dim postLocation As String
+    Dim finalStatus As Long
+    Dim finalStatusText As String
+    Dim currentUrl As String
+    Dim nextUrl As String
+    Dim locationHeader As String
+    Dim redirectChain As String
+    Dim pageTitle As String
+    Dim interpretation As String
+    Dim reportText As String
+    Dim reportFolder As String
+    Dim reportPath As String
+    Dim redirectCount As Long
+    Dim requestStage As String
+
+    vatNumber = InputBox( _
+        "Enter a UK VAT number to check." & vbCrLf & _
+        "Enter the number without GB.", _
+        "HMRC VAT Verification", "408556737")
+
+    If Len(Trim$(vatNumber)) = 0 Then Exit Sub
+
+    vatNumber = UCase$(Trim$(vatNumber))
+    vatNumber = Replace(vatNumber, "GB", "")
+    vatNumber = Replace(vatNumber, " ", "")
+    vatNumber = Replace(vatNumber, vbTab, "")
+    vatNumber = Replace(vatNumber, "-", "")
+
+    If Not IsNumeric(vatNumber) Then
+        MsgBox "The VAT number must contain digits only.", vbExclamation
+        Exit Sub
+    End If
+
+    If Len(vatNumber) <> 9 And Len(vatNumber) <> 12 Then
+        MsgBox "A UK VAT number should normally contain 9 or 12 digits.", vbExclamation
+        Exit Sub
+    End If
+
+    Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
+    http.SetTimeouts 10000, 10000, 15000, 30000
+    http.Option(6) = False
+
+    ' STEP 1: GET FORM
+    requestStage = "GET HMRC entry form"
+    http.Open "GET", HMRC_FORM_URL, False
+    http.SetRequestHeader "User-Agent", HMRC_USER_AGENT
+    http.SetRequestHeader "Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    http.Send
+
+    If http.Status <> 200 Then
+        Err.Raise vbObjectError + 701, , _
+            "HMRC entry form returned HTTP " & http.Status & " " & http.StatusText
+    End If
+
+    html = http.ResponseText
+    responseHeaders = http.GetAllResponseHeaders
+    cookies = HMRC_ExtractCookies(responseHeaders)
+    csrfToken = HMRC_ExtractCsrfToken(html)
+
+    If Len(csrfToken) = 0 Then
+        Err.Raise vbObjectError + 702, , "Could not extract the HMRC CSRF token."
+    End If
+
+    If Len(cookies) = 0 Then
+        Err.Raise vbObjectError + 703, , "HMRC did not issue a session cookie. Submission stopped."
+    End If
+
+    ' STEP 2: POST FORM
+    requestStage = "POST VAT number"
+    postData = "target=" & HMRC_UrlEncode(vatNumber) & _
+               "&csrfToken=" & HMRC_UrlEncode(csrfToken)
+
+    http.Open "POST", HMRC_FORM_URL, False
+    http.SetRequestHeader "User-Agent", HMRC_USER_AGENT
+    http.SetRequestHeader "Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    http.SetRequestHeader "Content-Type", "application/x-www-form-urlencoded"
+    http.SetRequestHeader "Referer", HMRC_FORM_URL
+    http.SetRequestHeader "Origin", "https://www.tax.service.gov.uk"
+    http.SetRequestHeader "Cookie", cookies
+    http.Send postData
+
+    postStatus = http.Status
+    postStatusText = http.StatusText
+    postLocation = HMRC_GetHeaderSafe(http, "Location")
+    response = http.ResponseText
+
+    newCookies = HMRC_ExtractCookies(http.GetAllResponseHeaders)
+    If Len(newCookies) > 0 Then cookies = HMRC_MergeCookies(cookies, newCookies)
+
+    ' STEP 3: FOLLOW REDIRECTS MANUALLY
+    currentUrl = HMRC_ResolveUrl(HMRC_FORM_URL, postLocation)
+    redirectChain = "POST " & HMRC_FORM_URL & vbCrLf & _
+                    "HTTP " & postStatus & " " & postStatusText & vbCrLf & _
+                    "Location: " & postLocation & vbCrLf & vbCrLf
+
+    If postStatus >= 300 And postStatus < 400 And Len(postLocation) > 0 Then
+
+        For redirectCount = 1 To 10
+
+            If Not HMRC_IsAllowedRedirect(currentUrl) Then
+                redirectChain = redirectChain & _
+                    "STOPPED: Redirect destination is outside HTTPS *.gov.uk: " & currentUrl & vbCrLf
+                Exit For
+            End If
+
+            requestStage = "GET redirect " & CStr(redirectCount)
+            http.Open "GET", currentUrl, False
+            http.SetRequestHeader "User-Agent", HMRC_USER_AGENT
+            http.SetRequestHeader "Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            http.SetRequestHeader "Referer", HMRC_FORM_URL
+            If Len(cookies) > 0 Then http.SetRequestHeader "Cookie", cookies
+            http.Send
+
+            finalStatus = http.Status
+            finalStatusText = http.StatusText
+            response = http.ResponseText
+            responseHeaders = http.GetAllResponseHeaders
+
+            newCookies = HMRC_ExtractCookies(responseHeaders)
+            If Len(newCookies) > 0 Then cookies = HMRC_MergeCookies(cookies, newCookies)
+
+            redirectChain = redirectChain & _
+                "GET " & currentUrl & vbCrLf & _
+                "HTTP " & finalStatus & " " & finalStatusText & vbCrLf
+
+            If finalStatus < 300 Or finalStatus >= 400 Then Exit For
+
+            locationHeader = HMRC_GetHeaderSafe(http, "Location")
+            redirectChain = redirectChain & "Location: " & locationHeader & vbCrLf & vbCrLf
+
+            If Len(locationHeader) = 0 Then Exit For
+
+            nextUrl = HMRC_ResolveUrl(currentUrl, locationHeader)
+
+            If StrComp(nextUrl, currentUrl, vbTextCompare) = 0 Then Exit For
+            currentUrl = nextUrl
+        Next redirectCount
+
+        If redirectCount > 10 Then
+            redirectChain = redirectChain & "STOPPED: More than 10 redirects." & vbCrLf
+        End If
+
+    Else
+        finalStatus = postStatus
+        finalStatusText = postStatusText
+        currentUrl = HMRC_FORM_URL
+    End If
+
+    ' STEP 4: CLASSIFY RESPONSE
+    pageTitle = HMRC_GetPageTitle(response)
+    interpretation = HMRC_ClassifyResponse(response, pageTitle, finalStatus)
+
+    ' STEP 5: REPORT
+    reportFolder = HMRC_GetReportFolder()
+    reportPath = reportFolder & "\HMRC_VAT_Test_Result.txt"
+
+    reportText = String(60, "=") & vbCrLf & _
+        "HMRC VAT SUBMISSION TEST" & vbCrLf & _
+        String(60, "=") & vbCrLf & vbCrLf
+
+    reportText = reportText & "VAT Number: " & vatNumber & vbCrLf
+    reportText = reportText & "POST HTTP Status: " & postStatus & vbCrLf
+    reportText = reportText & "POST Status Text: " & postStatusText & vbCrLf
+    reportText = reportText & "POST Redirect: " & postLocation & vbCrLf
+    reportText = reportText & "Final HTTP Status: " & finalStatus & vbCrLf
+    reportText = reportText & "Final Status Text: " & finalStatusText & vbCrLf
+    reportText = reportText & "Final Response URL: " & currentUrl & vbCrLf
+    reportText = reportText & "Response Length: " & Len(response) & vbCrLf
+    reportText = reportText & "Page Title: " & pageTitle & vbCrLf
+    reportText = reportText & "Interpretation: " & interpretation & vbCrLf
+
+    reportText = reportText & vbCrLf & "REDIRECT CHAIN" & vbCrLf & _
+        String(40, "-") & vbCrLf & redirectChain & vbCrLf
+
+    reportText = reportText & "RESPONSE MARKERS" & vbCrLf & _
+        String(40, "-") & vbCrLf & HMRC_FindMarkers(response) & vbCrLf
+
+    reportText = reportText & vbCrLf & "RESPONSE EXCERPT" & vbCrLf & _
+        String(40, "-") & vbCrLf & HMRC_SafeExcerpt(response, 12000)
+
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Set reportFile = fso.CreateTextFile(reportPath, True, True)
+    reportFile.Write reportText
+    reportFile.Close
+
+    Shell "notepad.exe """ & reportPath & """", vbNormalFocus
+
+    MsgBox "HMRC test finished." & vbCrLf & vbCrLf & _
+        "POST: " & postStatus & " " & postStatusText & vbCrLf & _
+        "Final response: " & finalStatus & " " & finalStatusText & vbCrLf & _
+        interpretation & vbCrLf & vbCrLf & _
+        "Report: " & reportPath, vbInformation
+
+CleanExit:
+    On Error Resume Next
+    If Not reportFile Is Nothing Then reportFile.Close
+    Set reportFile = Nothing
+    Set fso = Nothing
+    Set http = Nothing
+    Exit Sub
+
+ErrorHandler:
+    MsgBox "HMRC VAT test failed during: " & requestStage & vbCrLf & _
+        "Error " & Err.Number & ": " & Err.Description, vbCritical
+    Resume CleanExit
+
+End Sub
+
+Private Function HMRC_ExtractCsrfToken(ByVal html As String) As String
+    Dim re As Object, matches As Object, tagRe As Object, tags As Object, item As Object
+    Dim tag As String
+
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = True
+    re.IgnoreCase = True
+    re.Pattern = "<input\b[^>]*>"
+    Set tags = re.Execute(html)
+
+    For Each item In tags
+        tag = item.Value
+        If InStr(1, tag, "csrfToken", vbTextCompare) > 0 Then
+            Set tagRe = CreateObject("VBScript.RegExp")
+            tagRe.Global = False
+            tagRe.IgnoreCase = True
+            tagRe.Pattern = "\bname\s*=\s*[""']csrfToken[""']"
+            If tagRe.Test(tag) Then
+                tagRe.Pattern = "\bvalue\s*=\s*[""']([^""']+)[""']"
+                Set matches = tagRe.Execute(tag)
+                If matches.Count > 0 Then
+                    HMRC_ExtractCsrfToken = matches(0).SubMatches(0)
+                    Exit Function
+                End If
+            End If
+        End If
+    Next item
+End Function
+
+Private Function HMRC_ExtractCookies(ByVal headers As String) As String
+    Dim lines As Variant, line As Variant, cookie As String, p As Long, result As String
+    lines = Split(headers, vbCrLf)
+    For Each line In lines
+        If LCase$(Left$(Trim$(CStr(line)), 11)) = "set-cookie:" Then
+            cookie = Trim$(Mid$(Trim$(CStr(line)), 12))
+            p = InStr(cookie, ";")
+            If p > 0 Then cookie = Left$(cookie, p - 1)
+            If Len(cookie) > 0 Then
+                If Len(result) > 0 Then result = result & "; "
+                result = result & cookie
+            End If
+        End If
+    Next line
+    HMRC_ExtractCookies = result
+End Function
+
+Private Function HMRC_MergeCookies(ByVal oldCookies As String, ByVal newCookies As String) As String
+    Dim parts As Variant, part As Variant, name As String, p As Long, result As String
+    Dim dict As Object
+    Set dict = CreateObject("Scripting.Dictionary")
+    dict.CompareMode = 1
+
+    parts = Split(oldCookies & "; " & newCookies, ";")
+    For Each part In parts
+        p = InStr(1, CStr(part), "=")
+        If p > 1 Then
+            name = Trim$(Left$(CStr(part), p - 1))
+            If Len(name) > 0 Then dict(name) = Trim$(Mid$(CStr(part), p + 1))
+        End If
+    Next part
+
+    For Each part In dict.Keys
+        If Len(result) > 0 Then result = result & "; "
+        result = result & CStr(part) & "=" & CStr(dict(part))
+    Next part
+    HMRC_MergeCookies = result
+End Function
+
+Private Function HMRC_GetHeaderSafe(ByVal http As Object, ByVal headerName As String) As String
+    On Error Resume Next
+    HMRC_GetHeaderSafe = http.GetResponseHeader(headerName)
+    On Error GoTo 0
+End Function
+
+Private Function HMRC_ResolveUrl(ByVal baseUrl As String, ByVal location As String) As String
+    Dim schemeEnd As Long, hostStart As Long, hostEnd As Long, origin As String, path As String
+    location = Trim$(location)
+
+    If Len(location) = 0 Then
+        HMRC_ResolveUrl = baseUrl
+        Exit Function
+    End If
+
+    If LCase$(Left$(location, 7)) = "http://" Or _
+       LCase$(Left$(location, 8)) = "https://" Then
+        HMRC_ResolveUrl = location
+        Exit Function
+    End If
+
+    If Left$(location, 2) = "//" Then
+        HMRC_ResolveUrl = "https:" & location
+        Exit Function
+    End If
+
+    schemeEnd = InStr(1, baseUrl, "://")
+    If schemeEnd = 0 Then
+        HMRC_ResolveUrl = location
+        Exit Function
+    End If
+
+    hostStart = schemeEnd + 3
+    hostEnd = InStr(hostStart, baseUrl, "/")
+    If hostEnd = 0 Then
+        origin = baseUrl
+    Else
+        origin = Left$(baseUrl, hostEnd - 1)
+    End If
+
+    If Left$(location, 1) = "/" Then
+        HMRC_ResolveUrl = origin & location
+    Else
+        path = baseUrl
+        If InStr(path, "?") > 0 Then path = Left$(path, InStr(path, "?") - 1)
+        If InStrRev(path, "/") > schemeEnd + 2 Then
+            path = Left$(path, InStrRev(path, "/"))
+        Else
+            path = path & "/"
+        End If
+        HMRC_ResolveUrl = path & location
+    End If
+End Function
+
+Private Function HMRC_IsAllowedRedirect(ByVal url As String) As Boolean
+    Dim host As String, p As Long, slashPos As Long
+    If LCase$(Left$(url, 8)) <> "https://" Then Exit Function
+
+    host = Mid$(url, 9)
+    slashPos = InStr(host, "/")
+    If slashPos > 0 Then host = Left$(host, slashPos - 1)
+    p = InStr(host, ":")
+    If p > 0 Then host = Left$(host, p - 1)
+
+    host = LCase$(host)
+    HMRC_IsAllowedRedirect = (host = "gov.uk" Or Right$(host, 7) = ".gov.uk")
+End Function
+
+Private Function HMRC_UrlEncode(ByVal value As String) As String
+    Dim i As Long, code As Long, result As String
+    For i = 1 To Len(value)
+        code = AscW(Mid$(value, i, 1))
+        If code < 0 Then code = code + 65536
+        Select Case code
+            Case 48 To 57, 65 To 90, 97 To 122, 45, 46, 95, 126
+                result = result & Chr$(code)
+            Case Else
+                result = result & "%" & Right$("0" & Hex$(code), 2)
+        End Select
+    Next i
+    HMRC_UrlEncode = result
+End Function
+
+Private Function HMRC_GetPageTitle(ByVal html As String) As String
+    Dim re As Object, matches As Object, value As String
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = False
+    re.IgnoreCase = True
+    re.Pattern = "<title[^>]*>([\s\S]*?)</title>"
+    Set matches = re.Execute(html)
+    If matches.Count > 0 Then
+        value = matches(0).SubMatches(0)
+        value = Replace(value, "&amp;", "&")
+        value = Replace(value, "&nbsp;", " ")
+        HMRC_GetPageTitle = Trim$(Replace(Replace(value, vbCr, " "), vbLf, " "))
+    Else
+        HMRC_GetPageTitle = "No page title found"
+    End If
+End Function
+
+Private Function HMRC_ClassifyResponse(ByVal html As String, ByVal title As String, ByVal statusCode As Long) As String
+    Dim lowerHtml As String
+    lowerHtml = LCase$(html)
+
+    If statusCode < 200 Or statusCode >= 300 Then
+        HMRC_ClassifyResponse = "No result confirmed. Final HTTP response was not successful."
+    ElseIf InStr(lowerHtml, "what is the uk vat number you want to check") > 0 Then
+        HMRC_ClassifyResponse = "HMRC returned the entry form again. No VAT result confirmed."
+    ElseIf InStr(lowerHtml, "registered for vat") > 0 Or _
+           InStr(lowerHtml, "vat registration number") > 0 Or _
+           InStr(lowerHtml, "business name") > 0 Then
+        HMRC_ClassifyResponse = "Possible VAT result page. Inspect the returned details before relying on it."
+    ElseIf InStr(lowerHtml, "not found") > 0 Or _
+           InStr(lowerHtml, "not registered") > 0 Then
+        HMRC_ClassifyResponse = "Possible negative VAT result. Inspect the returned details before relying on it."
+    Else
+        HMRC_ClassifyResponse = "Unrecognised response. A successful VAT check has NOT been confirmed."
+    End If
+End Function
+
+Private Function HMRC_FindMarkers(ByVal html As String) As String
+    Dim terms As Variant, term As Variant, p As Long, result As String
+    terms = Array("There is a problem", "error-summary", "error-message", _
+        "not valid", "not found", "not registered", "registered for VAT", _
+        "business name", "VAT registration number", "What is the UK VAT number", _
+        "known", "consultation")
+    For Each term In terms
+        p = InStr(1, html, CStr(term), vbTextCompare)
+        If p > 0 Then result = result & "FOUND: " & CStr(term) & vbCrLf & _
+            HMRC_SafeExcerpt(Mid$(html, p, 450), 450) & vbCrLf & vbCrLf
+    Next term
+    If Len(result) = 0 Then result = "No known markers found."
+    HMRC_FindMarkers = result
+End Function
+
+Private Function HMRC_SafeExcerpt(ByVal html As String, ByVal maxLength As Long) As String
+    Dim re As Object, result As String
+    result = Left$(html, maxLength)
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = True
+    re.IgnoreCase = True
+    re.Pattern = "name=""csrfToken""\s+value=""[^""]*"""
+    result = re.Replace(result, "name=""csrfToken"" value=""[REDACTED]""")
+    re.Pattern = "Set-Cookie:\s*[^\r\n]*"
+    result = re.Replace(result, "Set-Cookie: [REDACTED]")
+    HMRC_SafeExcerpt = result
+End Function
+
+Private Function HMRC_GetReportFolder() As String
+    Dim fso As Object, userProfile As String, folder As String
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    userProfile = Environ$("USERPROFILE")
+    folder = userProfile & "\OneDrive - Samworth Brothers\Desktop\vbas"
+    If Not fso.FolderExists(folder) Then folder = userProfile & "\Desktop\vbas"
+    If Not fso.FolderExists(folder) Then
+        Err.Raise vbObjectError + 704, , "Could not find the vbas report folder on this computer: " & folder
+    End If
+    HMRC_GetReportFolder = folder
+End Function

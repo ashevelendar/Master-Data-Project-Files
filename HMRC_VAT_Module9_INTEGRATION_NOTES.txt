@@ -1,0 +1,64 @@
+HMRC VAT MODULE 9, INTEGRATION NOTES
+====================================
+
+File:
+  HMRC_VAT_Module9_FUNCTION.txt
+
+Import / installation:
+1. Open the Access database.
+2. Press ALT+F11.
+3. In the VBA editor choose File > Import File.
+4. Select the downloaded HMRC_VAT_Module9_FUNCTION.txt only if Access accepts the .txt extension.
+   If it does not, save a local copy with the extension .bas, then import that .bas file.
+   Alternatively, create a new standard module and paste the file contents.
+5. Rename the module to modHMRCVAT if desired.
+6. Choose Debug > Compile.
+
+PUBLIC FUNCTION
+---------------
+CheckHMRCVAT(VATNumber, RegisteredName, RegisteredAddress, Details)
+
+Returns one of:
+  VALID
+  INVALID
+  UNABLE TO VERIFY
+
+Example call from any standard module or form:
+
+Private Sub cmdCheckVAT_Click()
+
+    Dim vatStatus As String
+    Dim vatName As String
+    Dim vatAddress As String
+    Dim vatDetails As String
+
+    vatStatus = CheckHMRCVAT( _
+        Nz(Me.txtVATNumber.Value, ""), _
+        vatName, _
+        vatAddress, _
+        vatDetails)
+
+    Me.txtVATStatus.Value = vatStatus
+    Me.txtVATRegisteredName.Value = vatName
+    Me.txtVATRegisteredAddress.Value = vatAddress
+    Me.txtVATCheckDetails.Value = vatDetails
+
+End Sub
+
+IMPORTANT:
+- The control names above are EXAMPLES. Replace them with the actual names
+  of the controls on the supplier form.
+- Do not paste this example event procedure until the real form control
+  names have been checked.
+- The function itself is independent of any form and does not assume a
+  table name or supplier schema.
+- Do not mark a supplier as VAT-invalid when the function returns
+  UNABLE TO VERIFY. That means the service could not provide a conclusive
+  result, not that the number is invalid.
+- A VALID result confirms the VAT number and returns the registered name
+  and address. The supplier name/address should still be compared against
+  those details and discrepancies reviewed by a person.
+- This is an experimental integration with HMRC's public interactive
+  website, not a supported API. HMRC may change the page or restrict
+  automated requests. Test with known examples before operational use.
+- The function does not log cookies, CSRF tokens or raw response HTML.

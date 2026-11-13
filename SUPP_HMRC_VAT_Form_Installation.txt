@@ -1,0 +1,50 @@
+SUPPLIER CHECKING TOOL - HMRC VAT FORM
+=======================================
+
+Files:
+  modSUPP_VATFormBuilder.bas
+  Module9.bas (existing HMRC CheckHMRCVAT function)
+
+WHAT THIS BUILDS
+----------------
+- Creates an unbound popup form named SUPP_frmVATCheck.
+- Adds a CHECK VAT button to the Main form, next to ButtonVal where possible.
+- Leaves the existing Companies House validation button and GTIN form alone.
+- Reads the latest imported supplier record from SUPP_tblSupplierArchive.
+- Reads VAT number from NewVATNo, falling back to CurrentVATNo.
+- Reads supplier name from SupplierKnownAsName, AXSupplierName, then CompanyName.
+- Reads submitted supplier address using the existing SUPP_GetSubmittedAddress function.
+- Calls CheckHMRCVAT from the existing Module9.
+- Saves the result into SUPP_VAT-prefixed audit fields in SUPP_tblSupplierArchive.
+
+INSTALL
+-------
+1. Make a backup copy of the Access database.
+2. Open Access and press ALT+F11.
+3. In the VBA editor, choose File > Import File.
+4. Import modSUPP_VATFormBuilder.bas.
+5. Confirm the existing Module9 containing Public Function CheckHMRCVAT is present.
+6. Confirm Module4 contains Public Function SUPP_GetSubmittedAddress.
+7. Choose Debug > Compile.
+8. Run SUPP_BuildVATCheckForm once from the VBA editor (put cursor inside it and press F5).
+9. Return to the Main form. A new CHECK VAT button should appear next to the existing validation button.
+
+USE
+---
+1. Import a supplier request as usual.
+2. Open Main.
+3. Click CHECK VAT.
+4. Review the supplier's VAT number and details.
+5. Click CHECK VAT WITH HMRC.
+6. The result and returned registration details are displayed and saved to the archive.
+
+IMPORTANT BEHAVIOUR
+-------------------
+- VALID means HMRC returned a valid VAT registration result.
+- INVALID means HMRC explicitly returned an invalid result.
+- UNABLE TO VERIFY means the check could not be completed conclusively.
+- UNABLE TO VERIFY must never be treated as INVALID.
+- A VAT number being valid does not prove that the supplier submitting it is the registered business. A name comparison is shown for review.
+- The button checks the most recently imported archive row (highest ID), matching the current Main form's single-request import workflow.
+- This uses HMRC's public interactive web form, not a supported API. HMRC may change or restrict the website. Re-test after HMRC page changes and before relying on it operationally.
+- No Companies House code, form, or existing validation button is replaced.

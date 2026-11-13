@@ -1,0 +1,266 @@
+Option Compare Database
+Option Explicit
+
+'============================================================
+' HMRC VAT DIAGNOSTIC TOOLS
+'
+' This module intentionally contains no duplicate
+' RUN_HMRC_VAT_TEST or TestHMRCVATSubmission procedures.
+' The main test is in Module7.
+'
+' Available procedures:
+'   TestHMRCConnection
+'   InspectHMRCStartLink
+'   InspectHMRCVATForm
+'   InspectHMRCFormFields
+'   INSPECT_HMRC_RESPONSE_ERRORS
+'============================================================
+
+Private Const HMRC_DIAG_FORM_URL As String = _
+    "https://www.tax.service.gov.uk/check-vat-number/enter-vat-details"
+
+Private Const HMRC_DIAG_AGENT As String = _
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " & _
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+Public Sub TestHMRCConnection()
+    On Error GoTo ErrorHandler
+
+    Dim http As Object
+    Dim html As String
+
+    Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
+    http.SetTimeouts 10000, 10000, 15000, 30000
+    http.Option(6) = True
+
+    http.Open "GET", "https://www.gov.uk/check-uk-vat-number", False
+    http.SetRequestHeader "User-Agent", HMRC_DIAG_AGENT
+    http.SetRequestHeader "Accept", "text/html,application/xhtml+xml"
+    http.Send
+
+    html = http.ResponseText
+
+    MsgBox "HMRC connection test completed." & vbCrLf & vbCrLf & _
+        "HTTP Status: " & http.Status & vbCrLf & _
+        "Status Text: " & http.StatusText & vbCrLf & _
+        "Response Length: " & Len(html), vbInformation
+
+CleanExit:
+    Set http = Nothing
+    Exit Sub
+
+ErrorHandler:
+    MsgBox "HMRC connection test failed." & vbCrLf & _
+        "Error " & Err.Number & ": " & Err.Description, vbCritical
+    Resume CleanExit
+End Sub
+
+Public Sub InspectHMRCStartLink()
+    On Error GoTo ErrorHandler
+
+    Dim http As Object, html As String
+    Dim p As Long, startPos As Long, endPos As Long
+    Dim output As String
+
+    Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
+    http.SetTimeouts 10000, 10000, 15000, 30000
+    http.Option(6) = True
+    http.Open "GET", "https://www.gov.uk/check-uk-vat-number", False
+    http.SetRequestHeader "User-Agent", HMRC_DIAG_AGENT
+    http.Send
+
+    html = http.ResponseText
+    p = InStr(1, html, "Start now", vbTextCompare)
+
+    If p > 0 Then
+        startPos = p - 300
+        If startPos < 1 Then startPos = 1
+        endPos = p + 500
+        If endPos > Len(html) Then endPos = Len(html)
+        output = Mid$(html, startPos, endPos - startPos)
+    Else
+        output = "The Start now link was not found."
+    End If
+
+    MsgBox "HTTP Status: " & http.Status & vbCrLf & vbCrLf & output, vbInformation
+
+CleanExit:
+    Set http = Nothing
+    Exit Sub
+
+ErrorHandler:
+    MsgBox "Start link inspection failed." & vbCrLf & _
+        "Error " & Err.Number & ": " & Err.Description, vbCritical
+    Resume CleanExit
+End Sub
+
+Public Sub InspectHMRCVATForm()
+    On Error GoTo ErrorHandler
+
+    Dim http As Object, html As String
+    Dim formStart As Long, formEnd As Long
+    Dim formHTML As String, re As Object
+
+    Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
+    http.SetTimeouts 10000, 10000, 15000, 30000
+    http.Open "GET", HMRC_DIAG_FORM_URL, False
+    http.SetRequestHeader "User-Agent", HMRC_DIAG_AGENT
+    http.SetRequestHeader "Accept", "text/html"
+    http.Send
+
+    html = http.ResponseText
+    formStart = InStr(1, html, "<form", vbTextCompare)
+    If formStart > 0 Then formEnd = InStr(formStart, html, "</form>", vbTextCompare)
+
+    If formStart = 0 Or formEnd = 0 Then
+        formHTML = "No HTML form found." & vbCrLf & Left$(html, 4000)
+    Else
+        formHTML = Mid$(html, formStart, formEnd - formStart + Len("</form>"))
+        Set re = CreateObject("VBScript.RegExp")
+        re.Global = True
+        re.IgnoreCase = True
+        re.Pattern = "value\s*=\s*(""[^""]*""|'[^']*')"
+        formHTML = re.Replace(formHTML, "value=""[REDACTED]""")
+    End If
+
+    MsgBox "HTTP Status: " & http.Status & vbCrLf & _
+        "Response Length: " & Len(html) & vbCrLf & vbCrLf & _
+        Left$(formHTML, 3500), vbInformation
+
+CleanExit:
+    Set re = Nothing
+    Set http = Nothing
+    Exit Sub
+
+ErrorHandler:
+    MsgBox "Form inspection failed." & vbCrLf & _
+        "Error " & Err.Number & ": " & Err.Description, vbCritical
+    Resume CleanExit
+End Sub
+
+Public Sub InspectHMRCFormFields()
+    On Error GoTo ErrorHandler
+
+    Dim http As Object, html As String
+    Dim re As Object, matches As Object, item As Object
+    Dim tag As String, output As String
+    Dim count As Long
+
+    Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
+    http.SetTimeouts 10000, 10000, 15000, 30000
+    http.Open "GET", HMRC_DIAG_FORM_URL, False
+    http.SetRequestHeader "User-Agent", HMRC_DIAG_AGENT
+    http.Send
+
+    html = http.ResponseText
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = True
+    re.IgnoreCase = True
+    re.Pattern = "<form\b[^>]*>|<input\b[^>]*>|<button\b[^>]*>"
+    Set matches = re.Execute(html)
+
+    output = "HTTP Status: " & http.Status & vbCrLf & _
+        "Response Length: " & Len(html) & vbCrLf & String(45, "-") & vbCrLf
+
+    For Each item In matches
+        tag = CStr(item.Value)
+        tag = HMRC_RedactAttribute(tag, "value")
+        tag = HMRC_RedactAttribute(tag, "content")
+        output = output & tag & vbCrLf
+        count = count + 1
+        If count >= 50 Then Exit For
+    Next item
+
+    If count = 0 Then output = output & "No form fields found."
+
+    MsgBox Left$(output, 4000), vbInformation
+
+CleanExit:
+    Set item = Nothing
+    Set matches = Nothing
+    Set re = Nothing
+    Set http = Nothing
+    Exit Sub
+
+ErrorHandler:
+    MsgBox "Form field inspection failed." & vbCrLf & _
+        "Error " & Err.Number & ": " & Err.Description, vbCritical
+    Resume CleanExit
+End Sub
+
+Public Sub INSPECT_HMRC_RESPONSE_ERRORS()
+    On Error GoTo ErrorHandler
+
+    Dim http As Object, html As String
+    Dim re As Object, matches As Object, item As Object
+    Dim reportText As String, reportPath As String
+    Dim fso As Object, reportFile As Object
+    Dim reportFolder As String
+
+    Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
+    http.SetTimeouts 10000, 10000, 15000, 30000
+    http.Open "GET", HMRC_DIAG_FORM_URL, False
+    http.SetRequestHeader "User-Agent", HMRC_DIAG_AGENT
+    http.Send
+
+    html = http.ResponseText
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = True
+    re.IgnoreCase = True
+    re.Pattern = "<(h1|h2|p|div)[^>]*>[\s\S]*?</\1>"
+    Set matches = re.Execute(html)
+
+    reportText = "HMRC FORM DIAGNOSTIC" & vbCrLf & _
+        String(50, "=") & vbCrLf & _
+        "HTTP Status: " & http.Status & vbCrLf & _
+        "Response Length: " & Len(html) & vbCrLf & vbCrLf & _
+        "PAGE CONTENT:" & vbCrLf
+
+    For Each item In matches
+        If InStr(1, item.Value, "csrfToken", vbTextCompare) = 0 Then
+            reportText = reportText & item.Value & vbCrLf & vbCrLf
+        End If
+    Next item
+
+    reportFolder = Environ$("USERPROFILE") & "\OneDrive - Samworth Brothers\Desktop\vbas"
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If Not fso.FolderExists(reportFolder) Then
+        reportFolder = Environ$("USERPROFILE") & "\Desktop\vbas"
+    End If
+    If Not fso.FolderExists(reportFolder) Then
+        Err.Raise vbObjectError + 801, , "Could not find the vbas report folder."
+    End If
+
+    reportPath = reportFolder & "\HMRC_Form_Diagnostic.txt"
+    Set reportFile = fso.CreateTextFile(reportPath, True, True)
+    reportFile.Write reportText
+    reportFile.Close
+
+    Shell "notepad.exe """ & reportPath & """", vbNormalFocus
+
+CleanExit:
+    On Error Resume Next
+    If Not reportFile Is Nothing Then reportFile.Close
+    Set reportFile = Nothing
+    Set fso = Nothing
+    Set item = Nothing
+    Set matches = Nothing
+    Set re = Nothing
+    Set http = Nothing
+    Exit Sub
+
+ErrorHandler:
+    MsgBox "HMRC diagnostic failed." & vbCrLf & _
+        "Error " & Err.Number & ": " & Err.Description, vbCritical
+    Resume CleanExit
+End Sub
+
+Private Function HMRC_RedactAttribute(ByVal htmlTag As String, ByVal attributeName As String) As String
+    Dim re As Object
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = True
+    re.IgnoreCase = True
+    re.Pattern = "\b" & attributeName & "\s*=\s*(""[^""]*""|'[^']*')"
+    HMRC_RedactAttribute = re.Replace(htmlTag, attributeName & "=""[REDACTED]""")
+    Set re = Nothing
+End Function

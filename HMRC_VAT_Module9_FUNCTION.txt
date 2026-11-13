@@ -1,0 +1,528 @@
+Option Compare Database
+Option Explicit
+
+'============================================================
+' HMRC VAT CHECK FUNCTION
+'
+' Public entry point:
+'   CheckHMRCVAT(VATNumber, RegisteredName, RegisteredAddress, Details)
+'
+' Returns:
+'   "VALID"
+'   "INVALID"
+'   "UNABLE TO VERIFY"
+'
+' This uses HMRC's public interactive web form, not the
+' authenticated HMRC Developer API.
+'
+' No external references or installed software required.
+' Uses late-bound WinHTTP and VBScript.RegExp.
+'
+' Example:
+'   Dim vatStatus As String
+'   Dim vatName As String
+'   Dim vatAddress As String
+'   Dim vatDetails As String
+'
+'   vatStatus = CheckHMRCVAT("408556737", vatName, vatAddress, vatDetails)
+'
+'============================================================
+
+Private Const HMRC_CHECK_FORM_URL As String = _
+    "https://www.tax.service.gov.uk/check-vat-number/enter-vat-details"
+
+Private Const HMRC_CHECK_AGENT As String = _
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " & _
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+Public Function CheckHMRCVAT( _
+    ByVal VATNumber As String, _
+    ByRef RegisteredName As String, _
+    ByRef RegisteredAddress As String, _
+    ByRef Details As String) As String
+
+    On Error GoTo ErrorHandler
+
+    Dim http As Object
+    Dim html As String
+    Dim headers As String
+    Dim cookies As String
+    Dim newCookies As String
+    Dim csrfToken As String
+    Dim cleanVAT As String
+    Dim postBody As String
+    Dim postStatus As Long
+    Dim postLocation As String
+    Dim currentUrl As String
+    Dim nextUrl As String
+    Dim responseStatus As Long
+    Dim responseText As String
+    Dim redirectCount As Long
+    Dim requestReferer As String
+    Dim resultHeading As String
+
+    RegisteredName = vbNullString
+    RegisteredAddress = vbNullString
+    Details = vbNullString
+    CheckHMRCVAT = "UNABLE TO VERIFY"
+
+    cleanVAT = HMRC_CleanVATNumber(VATNumber)
+
+    If Len(cleanVAT) <> 9 And Len(cleanVAT) <> 12 Then
+        Details = "UK VAT number must contain 9 or 12 digits."
+        Exit Function
+    End If
+
+    If Not HMRC_IsDigitsOnly(cleanVAT) Then
+        Details = "VAT number must contain digits only, optionally prefixed by GB."
+        Exit Function
+    End If
+
+    Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
+    http.SetTimeouts 10000, 10000, 15000, 30000
+    http.Option(6) = False
+
+    ' 1. Retrieve the form and its session.
+    http.Open "GET", HMRC_CHECK_FORM_URL, False
+    HMRC_SetCommonHeaders http
+    http.Send
+
+    If http.Status <> 200 Then
+        Details = "HMRC form request returned HTTP " & http.Status & " " & http.StatusText
+        GoTo SafeExit
+    End If
+
+    html = http.ResponseText
+    headers = http.GetAllResponseHeaders
+    cookies = HMRC_CheckExtractCookies(headers)
+    csrfToken = HMRC_CheckExtractCsrf(html)
+
+    If Len(csrfToken) = 0 Then
+        Details = "HMRC did not provide a readable CSRF token."
+        GoTo SafeExit
+    End If
+
+    If Len(cookies) = 0 Then
+        Details = "HMRC did not provide a session cookie."
+        GoTo SafeExit
+    End If
+
+    ' 2. Submit the VAT number.
+    postBody = "target=" & HMRC_CheckUrlEncode(cleanVAT) & _
+               "&csrfToken=" & HMRC_CheckUrlEncode(csrfToken)
+
+    http.Open "POST", HMRC_CHECK_FORM_URL, False
+    HMRC_SetCommonHeaders http
+    http.SetRequestHeader "Content-Type", "application/x-www-form-urlencoded"
+    http.SetRequestHeader "Origin", "https://www.tax.service.gov.uk"
+    http.SetRequestHeader "Referer", HMRC_CHECK_FORM_URL
+    http.SetRequestHeader "Cookie", cookies
+    http.Send postBody
+
+    postStatus = http.Status
+    postLocation = HMRC_CheckGetHeader(http, "Location")
+
+    newCookies = HMRC_CheckExtractCookies(http.GetAllResponseHeaders)
+    If Len(newCookies) > 0 Then cookies = HMRC_CheckMergeCookies(cookies, newCookies)
+
+    If postStatus < 300 Or postStatus >= 400 Or Len(postLocation) = 0 Then
+        Details = "HMRC did not return the expected result redirect. HTTP " & _
+                  postStatus & " " & http.StatusText
+        GoTo SafeExit
+    End If
+
+    currentUrl = HMRC_CheckResolveUrl(HMRC_CHECK_FORM_URL, postLocation)
+    requestReferer = HMRC_CHECK_FORM_URL
+
+    ' 3. Follow the redirect chain, retaining the session.
+    For redirectCount = 1 To 10
+
+        If Not HMRC_CheckIsAllowedGovUrl(currentUrl) Then
+            Details = "HMRC redirected outside the permitted HTTPS gov.uk domain."
+            GoTo SafeExit
+        End If
+
+        http.Open "GET", currentUrl, False
+        HMRC_SetCommonHeaders http
+        http.SetRequestHeader "Referer", requestReferer
+        If Len(cookies) > 0 Then http.SetRequestHeader "Cookie", cookies
+        http.Send
+
+        responseStatus = http.Status
+        responseText = http.ResponseText
+        headers = http.GetAllResponseHeaders
+
+        newCookies = HMRC_CheckExtractCookies(headers)
+        If Len(newCookies) > 0 Then cookies = HMRC_CheckMergeCookies(cookies, newCookies)
+
+        If responseStatus < 300 Or responseStatus >= 400 Then Exit For
+
+        nextUrl = HMRC_CheckGetHeader(http, "Location")
+        If Len(nextUrl) = 0 Then
+            Details = "HMRC returned a redirect without a Location header."
+            GoTo SafeExit
+        End If
+
+        requestReferer = currentUrl
+        currentUrl = HMRC_CheckResolveUrl(currentUrl, nextUrl)
+    Next redirectCount
+
+    If redirectCount > 10 Then
+        Details = "HMRC exceeded the maximum number of redirects."
+        GoTo SafeExit
+    End If
+
+    If responseStatus <> 200 Then
+        Details = "HMRC result request returned HTTP " & responseStatus
+        GoTo SafeExit
+    End If
+
+    ' 4. Read the result heading.
+    resultHeading = HMRC_CheckGetResultHeading(responseText)
+
+    If InStr(1, resultHeading, "Valid UK VAT number", vbTextCompare) > 0 Then
+
+        RegisteredName = HMRC_CheckExtractLabeledValue( _
+            responseText, "Registered business name")
+
+        RegisteredAddress = HMRC_CheckExtractAddress( _
+            responseText, "Registered business address")
+
+        If Len(RegisteredName) = 0 Then
+            Details = "HMRC displayed a valid result but the registered business name could not be extracted."
+            GoTo SafeExit
+        End If
+
+        If Len(RegisteredAddress) = 0 Then
+            Details = "HMRC displayed a valid result but the registered address could not be extracted."
+            GoTo SafeExit
+        End If
+
+        CheckHMRCVAT = "VALID"
+        Details = "HMRC confirmed the VAT number. Result page: " & currentUrl
+
+    ElseIf InStr(1, resultHeading, "Invalid UK VAT number", vbTextCompare) > 0 _
+        Or InStr(1, resultHeading, "Not a valid UK VAT number", vbTextCompare) > 0 Then
+
+        CheckHMRCVAT = "INVALID"
+        Details = "HMRC returned an invalid VAT number result."
+
+    Else
+
+        Details = "HMRC returned an unrecognised result page. Heading: " & resultHeading
+
+    End If
+
+SafeExit:
+    On Error Resume Next
+    Set http = Nothing
+    Exit Function
+
+ErrorHandler:
+    Details = "Error " & Err.Number & ": " & Err.Description
+    CheckHMRCVAT = "UNABLE TO VERIFY"
+    Resume SafeExit
+
+End Function
+
+Private Sub HMRC_SetCommonHeaders(ByVal http As Object)
+    http.SetRequestHeader "User-Agent", HMRC_CHECK_AGENT
+    http.SetRequestHeader "Accept", _
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+End Sub
+
+Private Function HMRC_CleanVATNumber(ByVal value As String) As String
+    value = UCase$(Trim$(value))
+    value = Replace(value, "GB", "")
+    value = Replace(value, " ", "")
+    value = Replace(value, vbTab, "")
+    value = Replace(value, "-", "")
+    value = Replace(value, Chr$(160), "")
+    HMRC_CleanVATNumber = value
+End Function
+
+Private Function HMRC_IsDigitsOnly(ByVal value As String) As Boolean
+    Dim i As Long, code As Long
+    If Len(value) = 0 Then Exit Function
+    For i = 1 To Len(value)
+        code = AscW(Mid$(value, i, 1))
+        If code < 48 Or code > 57 Then Exit Function
+    Next i
+    HMRC_IsDigitsOnly = True
+End Function
+
+Private Function HMRC_CheckExtractCsrf(ByVal html As String) As String
+    Dim re As Object, tags As Object, item As Object
+    Dim tag As String, valueMatches As Object
+
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = True
+    re.IgnoreCase = True
+    re.Pattern = "<input\b[^>]*>"
+    Set tags = re.Execute(html)
+
+    For Each item In tags
+        tag = item.Value
+
+        If InStr(1, tag, "csrfToken", vbTextCompare) > 0 Then
+            Set re = CreateObject("VBScript.RegExp")
+            re.Global = False
+            re.IgnoreCase = True
+            re.Pattern = "\bname\s*=\s*[""']csrfToken[""']"
+
+            If re.Test(tag) Then
+                re.Pattern = "\bvalue\s*=\s*[""']([^""']+)[""']"
+                Set valueMatches = re.Execute(tag)
+
+                If valueMatches.Count > 0 Then
+                    HMRC_CheckExtractCsrf = valueMatches(0).SubMatches(0)
+                    Exit Function
+                End If
+            End If
+        End If
+    Next item
+End Function
+
+Private Function HMRC_CheckExtractCookies(ByVal headers As String) As String
+    Dim lines As Variant, line As Variant
+    Dim cookie As String, p As Long, result As String
+
+    lines = Split(headers, vbCrLf)
+
+    For Each line In lines
+        If LCase$(Left$(Trim$(CStr(line)), 11)) = "set-cookie:" Then
+            cookie = Trim$(Mid$(Trim$(CStr(line)), 12))
+            p = InStr(cookie, ";")
+            If p > 0 Then cookie = Left$(cookie, p - 1)
+
+            If Len(cookie) > 0 Then
+                If Len(result) > 0 Then result = result & "; "
+                result = result & cookie
+            End If
+        End If
+    Next line
+
+    HMRC_CheckExtractCookies = result
+End Function
+
+Private Function HMRC_CheckMergeCookies(ByVal oldCookies As String, ByVal newCookies As String) As String
+    Dim dict As Object, parts As Variant, part As Variant
+    Dim p As Long, cookieName As String, result As String, key As Variant
+
+    Set dict = CreateObject("Scripting.Dictionary")
+    dict.CompareMode = 1
+
+    parts = Split(oldCookies & "; " & newCookies, ";")
+
+    For Each part In parts
+        p = InStr(1, CStr(part), "=")
+        If p > 1 Then
+            cookieName = Trim$(Left$(CStr(part), p - 1))
+            dict(cookieName) = Trim$(Mid$(CStr(part), p + 1))
+        End If
+    Next part
+
+    For Each key In dict.Keys
+        If Len(result) > 0 Then result = result & "; "
+        result = result & CStr(key) & "=" & CStr(dict(key))
+    Next key
+
+    HMRC_CheckMergeCookies = result
+End Function
+
+Private Function HMRC_CheckGetHeader(ByVal http As Object, ByVal headerName As String) As String
+    On Error Resume Next
+    HMRC_CheckGetHeader = http.GetResponseHeader(headerName)
+    On Error GoTo 0
+End Function
+
+Private Function HMRC_CheckResolveUrl(ByVal baseUrl As String, ByVal location As String) As String
+    Dim schemeEnd As Long, hostEnd As Long
+    Dim origin As String, basePath As String
+
+    location = Trim$(location)
+
+    If Len(location) = 0 Then
+        HMRC_CheckResolveUrl = baseUrl
+        Exit Function
+    End If
+
+    If LCase$(Left$(location, 7)) = "http://" Or _
+       LCase$(Left$(location, 8)) = "https://" Then
+        HMRC_CheckResolveUrl = location
+        Exit Function
+    End If
+
+    If Left$(location, 2) = "//" Then
+        HMRC_CheckResolveUrl = "https:" & location
+        Exit Function
+    End If
+
+    schemeEnd = InStr(1, baseUrl, "://")
+    hostEnd = InStr(schemeEnd + 3, baseUrl, "/")
+
+    If hostEnd = 0 Then
+        origin = baseUrl
+    Else
+        origin = Left$(baseUrl, hostEnd - 1)
+    End If
+
+    If Left$(location, 1) = "/" Then
+        HMRC_CheckResolveUrl = origin & location
+    Else
+        basePath = baseUrl
+        If InStr(basePath, "?") > 0 Then basePath = Left$(basePath, InStr(basePath, "?") - 1)
+        If InStrRev(basePath, "/") > schemeEnd + 2 Then
+            basePath = Left$(basePath, InStrRev(basePath, "/"))
+        Else
+            basePath = basePath & "/"
+        End If
+        HMRC_CheckResolveUrl = basePath & location
+    End If
+End Function
+
+Private Function HMRC_CheckIsAllowedGovUrl(ByVal url As String) As Boolean
+    Dim host As String, p As Long
+
+    If LCase$(Left$(url, 8)) <> "https://" Then Exit Function
+
+    host = Mid$(url, 9)
+    p = InStr(host, "/")
+    If p > 0 Then host = Left$(host, p - 1)
+    p = InStr(host, "?")
+    If p > 0 Then host = Left$(host, p - 1)
+    p = InStr(host, "#")
+    If p > 0 Then host = Left$(host, p - 1)
+    p = InStr(host, ":")
+    If p > 0 Then host = Left$(host, p - 1)
+
+    host = LCase$(host)
+    HMRC_CheckIsAllowedGovUrl = (host = "gov.uk" Or Right$(host, 7) = ".gov.uk")
+End Function
+
+Private Function HMRC_CheckUrlEncode(ByVal value As String) As String
+    Dim i As Long, code As Long, result As String
+
+    For i = 1 To Len(value)
+        code = AscW(Mid$(value, i, 1))
+        If code < 0 Then code = code + 65536
+
+        Select Case code
+            Case 48 To 57, 65 To 90, 97 To 122, 45, 46, 95, 126
+                result = result & Chr$(code)
+            Case Else
+                result = result & "%" & Right$("0" & Hex$(code), 2)
+        End Select
+    Next i
+
+    HMRC_CheckUrlEncode = result
+End Function
+
+Private Function HMRC_CheckGetResultHeading(ByVal html As String) As String
+    Dim re As Object, matches As Object
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = False
+    re.IgnoreCase = True
+    re.Pattern = "<h1\b[^>]*>([\s\S]*?)</h1>"
+
+    Set matches = re.Execute(html)
+
+    If matches.Count > 0 Then
+        HMRC_CheckGetResultHeading = HMRC_CheckHtmlToText(matches(0).SubMatches(0))
+    Else
+        HMRC_CheckGetResultHeading = "No result heading found"
+    End If
+End Function
+
+Private Function HMRC_CheckExtractLabeledValue(ByVal html As String, ByVal labelText As String) As String
+    Dim re As Object, matches As Object
+    Dim pattern As String
+
+    pattern = "<h3\b[^>]*>\s*" & HMRC_CheckRegexEscape(labelText) & _
+              "\s*</h3>\s*<p\b[^>]*>([\s\S]*?)</p>"
+
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = False
+    re.IgnoreCase = True
+    re.Pattern = pattern
+
+    Set matches = re.Execute(html)
+
+    If matches.Count > 0 Then
+        HMRC_CheckExtractLabeledValue = HMRC_CheckHtmlToText(matches(0).SubMatches(0))
+    End If
+End Function
+
+Private Function HMRC_CheckExtractAddress(ByVal html As String, ByVal labelText As String) As String
+    Dim re As Object, matches As Object
+    Dim pattern As String, rawAddress As String
+
+    pattern = "<h3\b[^>]*>\s*" & HMRC_CheckRegexEscape(labelText) & _
+              "\s*</h3>\s*<p\b[^>]*>([\s\S]*?)</p>"
+
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = False
+    re.IgnoreCase = True
+    re.Pattern = pattern
+
+    Set matches = re.Execute(html)
+
+    If matches.Count > 0 Then
+        rawAddress = matches(0).SubMatches(0)
+        rawAddress = Replace(rawAddress, "<br/>", vbLf, 1, -1, vbTextCompare)
+        rawAddress = Replace(rawAddress, "<br />", vbLf, 1, -1, vbTextCompare)
+        rawAddress = Replace(rawAddress, "<br>", vbLf, 1, -1, vbTextCompare)
+        HMRC_CheckExtractAddress = HMRC_CheckHtmlToText(rawAddress)
+    End If
+End Function
+
+Private Function HMRC_CheckHtmlToText(ByVal html As String) As String
+    Dim re As Object, result As String
+
+    result = html
+
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = True
+    re.IgnoreCase = True
+    re.Pattern = "<[^>]+>"
+    result = re.Replace(result, " ")
+
+    result = Replace(result, "&amp;", "&")
+    result = Replace(result, "&nbsp;", " ")
+    result = Replace(result, "&#39;", "'")
+    result = Replace(result, "&quot;", """")
+    result = Replace(result, "&lt;", "<")
+    result = Replace(result, "&gt;", ">")
+
+    result = Replace(result, vbCr, vbLf)
+    result = Replace(result, vbTab, " ")
+
+    Do While InStr(result, "  ") > 0
+        result = Replace(result, "  ", " ")
+    Loop
+
+    Do While InStr(result, vbLf & " ") > 0
+        result = Replace(result, vbLf & " ", vbLf)
+    Loop
+
+    Do While InStr(result, " " & vbLf) > 0
+        result = Replace(result, " " & vbLf, vbLf)
+    Loop
+
+    result = Trim$(result)
+
+    Do While InStr(result, vbLf & vbLf) > 0
+        result = Replace(result, vbLf & vbLf, vbLf)
+    Loop
+
+    HMRC_CheckHtmlToText = result
+End Function
+
+Private Function HMRC_CheckRegexEscape(ByVal value As String) As String
+    Dim chars As Variant, item As Variant
+    chars = Array("\", ".", "+", "*", "?", "^", "$", "(", ")", "[", "]", "{", "}", "|")
+    For Each item In chars
+        value = Replace(value, CStr(item), "\" & CStr(item))
+    Next item
+    HMRC_CheckRegexEscape = value
+End Function
